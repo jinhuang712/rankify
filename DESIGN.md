@@ -1,205 +1,124 @@
 # Design
 
-This document has two parts. The principles come first: rules that every change must keep, each with the check that proves it. The design that follows from them comes second.
+This document covers how rankify works and why it is built this way. The rules behind it are in [PHILOSOPHY.md](PHILOSOPHY.md). The command reference is in [rankify/cli/CLI.md](rankify/cli/CLI.md). Exact formulas, thresholds and table columns will live in the code and its tests, not here.
 
-## Principles
+## The big picture
 
-| # | Principle | What it means | How we check it |
-|---|---|---|---|
-| 1 | **One source of truth** | The `rounds` table is the only record of what happened. It is append-only: undo and corrections are new rows. Fits, plans and forecasts are derived and can be rebuilt at any time. | `rankify verify` rebuilds every derived row from `rounds` and compares. |
-| 2 | **Same answers, same result** | Scores depend only on the set of answers, never on their order or timing. An answer from the first minute counts exactly as much as one from the last. | Property test: shuffle the rounds, refit, and every score matches within 1e-9. |
-| 3 | **An answer is evidence, not fact** | No single answer can lock an order forever. How much an answer counts depends on how consistent this judge has been. | Simulated judges with careless clicks still reach the right ranking. |
-| 4 | **Every round earns its place** | The planner picks each round by expected information gain per second, for the current mode. A round whose expected gain is below the floor is never asked. | `rankify why` shows the gain for any round. The benchmark counts wasted rounds. |
-| 5 | **Honest numbers** | Every score has a range. Confidence is calibrated: when it says 90%, it is right about 90% of the time. Rounds left is always a range, never a bare number. | Calibration tests in [EXPERIMENT.md](EXPERIMENT.md). |
-| 6 | **Instant** | From answer to next round takes under 50 ms (95th percentile, up to 200 items). Slow work runs in the background and never blocks the next round. | Performance tests that fail when a step goes over its target. |
-| 7 | **Proven math in the core** | The model is Bradley–Terry / Plackett–Luce. We do not invent a scoring model. New ideas go in the planner, where they can be measured. | Our fits match the `choix` library on shared test data. |
-| 8 | **Reproducible randomness** | All randomness (item choice tie-breaks, display order, simulations) comes from a seeded generator, and each round stores its seed. | Replay test: the same seed and answers produce the same rounds. |
-| 9 | **Control bias** | Items are shown in random order. Each round logs what was shown and where. The model estimates position bias and removes it. | A simulated judge who favours the first slot still gets the right ranking. |
-| 10 | **Judges are equal** | One judge's many votes must not silently outweigh many judges' few votes. Consensus and personal rankings are separate outputs. | Multi-judge tests (Phase 6). |
-| 11 | **Every decision is explainable** | The planner stores the candidates it weighed, their gain and cost, and its pick. | `rankify why <round>`. |
-| 12 | **Plain words on screen** | The UI says Score, Confidence, Could be, Round and Rounds left. Math names stay in code and docs. | Review of every screen and report. |
-| 13 | **Local first** | Data stays on the machine. A remote option, when it comes, syncs the same append-only log. | No network calls in the engine or the store. |
+```text
+ judge ──answer──> CLI / terminal UI ──add──> rounds (the log)
+                        ^                         │
+                        │ next round              │ every answer
+                        │                         v
+                     planner <──scores, ranges── fit
+                        │
+                        └──> forecast, in background ──> rounds left
+```
+
+You answer a round, and the answer is added to the log. The model is refitted to every answer in the log, which gives each item a score and a range. The planner uses those to choose the next round. In the background, the forecast estimates how many rounds are left. Everything except the log can be rebuilt from the log.
 
 ## Words
 
-| On screen | In the math | Definition |
-|---|---|---|
-| Score | θ | 1500 + 173.7 × (θ − average θ). This is the Elo scale: 173.7 = 400 / ln 10. |
-| Confidence | P(θ_r > θ_r+1 \| answers) | The chance that the item at rank r really belongs above the item at rank r+1 |
-| Could be | 90% rank interval | The 5th to 95th percentile of the item's rank |
-| Round | Query | One question shown to a judge |
-| Rounds left | Forecast | Median and 10–90% range of the remaining rounds |
+- **Score**: an item's strength on the Elo scale. 1500 is average. 100 points apart means the higher item wins about 64% of the time.
+- **Confidence**: the chance that an item really belongs above the next one.
+- **Could be**: where the item might really rank, as a 90% range.
+- **Round**: one question. A round is a *pair* ("which is better?"), a *pick* ("which is best of these?") or a *rank* ("put these in order").
+- **Mode**: how sure you need to be: Quick, Stable or Exact.
 
-Terms used in code and docs: **list** (the set being ranked), **item**, **judge** (a person answering), **round type** (`pair`, `pick`, `rank`), **mode** (Quick, Stable, Exact), **fit**, **planner**, **forecast**.
+In code and docs we also say *list*, *item*, *judge*, *fit*, *planner* and *forecast*.
 
-## Architecture
+## The model
 
-```text
- judge ──answer──> CLI / TUI ──append──> rounds   (SQLite, source of truth)
-                      ^                     │
-                      │ next round          │ all rounds
-                      │                     v
-                   planner <──scores, ranges── fit ──> fits      (derived)
-                      │
-                      ├──> plans                                 (derived)
-                      └──> forecast, in background ──> forecasts (derived)
-```
+Each item has one hidden score. A single family of models explains every round type with those same scores. Bradley–Terry covers pairs. Plackett–Luce covers picks and full orderings, and it treats an ordering as "pick the best, then the best of the rest". Elo uses the same curve, so scores convert directly to the Elo scale.
 
-```text
-rankify/
-  engine/          pure math, no I/O
-    model.py       likelihoods: pair (with ties), pick, rank; position bias
-    fit.py         best fit by Newton's method; uncertainty from the Hessian
-    planner.py     candidate rounds; information gain ÷ expected seconds
-    stop.py        Quick / Stable / Exact targets
-    forecast.py    rounds-left simulation
-    timing.py      per-judge seconds per round type and size
-  store/           SQLite schema, migrations, queries; no math
-  cli/             Typer commands
-  tui/             Textual app
-  report/          agent report (Markdown and JSON)
-  sim/             simulated judges, baselines, benchmark runner
-tests/
-```
+Three additions keep the model honest:
 
-The engine never touches the database, and the store never does math. Both the CLI and the simulator call the same engine functions.
+- **"Can't decide" is a real answer.** For pairs we use Davidson's extension of Bradley–Terry, which models ties. In v1, "can't decide" in a pick or rank round is recorded but not used.
+- **Position bias is measured.** Each display slot gets a small fitted bonus, so a habit of choosing the first item doesn't leak into the scores.
+- **Every score starts in the middle, with a wide range.** This gives the fit a single answer and keeps new or rarely seen items from jumping around. The width of that starting range is learned from how consistent the judge is, so a very consistent judge's answers count for more.
 
-## Model
+The model has two known limits. It assumes taste lies on one axis. It also assumes that adding a third option doesn't change the odds between two others. Similar items can break the second assumption, so the planner keeps near-identical items out of pick rounds. The report flags answers the model can't explain, which is where either limit would show up.
 
-Each item `i` has a hidden score `θ_i`. During a round, item `i` sits in a display slot `s`, and its utility is `u_i = θ_i + β_s`. The term `β_s` is the position bias of that slot. It is fitted from the data, and the last slot is fixed at 0.
+## Fitting
 
-| Round type | Probability of the answer |
-|---|---|
-| `pair`, i beats j | `e^u_i / (e^u_i + e^u_j)` (Bradley–Terry) |
-| `pair`, "can't decide" | `ν·√(e^u_i·e^u_j) / (e^u_i + e^u_j + ν·√(e^u_i·e^u_j))` (Davidson 1970). `ν` is fitted. |
-| `pick`, i is best of set S | `e^u_i / Σ_{j∈S} e^u_j` (Luce) |
-| `rank`, full order of S | Product of `pick` probabilities: best of all, then best of the rest, and so on (Plackett–Luce) |
-| `pick` or `rank`, "can't decide" | Recorded, but carries no information in v1. The planner then prefers pairs for those items. |
+After each round, the model is fitted to all answers at once. This is what makes the result independent of answer order, and it is the main difference from Elo, which updates one match at a time. An Elo update is one small step toward this same fit.
 
-**Prior.** Each score starts as `θ_i ~ Normal(0, σ²)`. This gives the fit a single answer, and it keeps items with few rounds near the middle with a wide range. New items can join at any time. `σ` is learned from the judge's own consistency, so a very consistent judge gets a wider `σ` and each answer counts for more.
+The fit starts from the previous scores, so one new answer needs only a few Newton steps. Each item's range comes from the curvature of the fit around its best value (the Laplace approximation). Score, Confidence and Could be all follow from the scores and their ranges. Two items that are confidently close become a confident tie, shown as `=`, and the planner stops asking about them.
 
-**Known limits.** The model assumes one score per item (one axis of taste). It also assumes that adding a third option doesn't change the odds between two others. Similar items can break that second assumption, so the planner keeps confident ties out of `pick` rounds.
+## Choosing the next round
 
-## Fit
+The planner looks for the question that teaches the most per second of your time, about the part of the ranking your mode cares about.
 
-- We find the best fit (maximum a posteriori) by Newton's method. The log posterior is concave in the scores, so there is exactly one best fit.
-- Each fit starts from the previous scores. After one new round, it usually needs 1–3 Newton steps.
-- Uncertainty comes from the Laplace approximation: the covariance is the inverse of the negative Hessian at the best fit, computed with a Cholesky solve.
-- Derived numbers:
-  - **Confidence** = `Φ((μ_r − μ_r+1) / sd(θ_r − θ_r+1))` under the normal approximation.
-  - **Could be** = the 5th to 95th percentile of the item's rank over 1,000 draws from the approximate posterior.
-  - **Confident tie**: `P(|θ_i − θ_j| < m) ≥ 0.9`, where the tie margin `m` defaults to 30 Score points (about a 54% win chance). It is shown as `=`.
+It starts from the items in that part whose order is still in doubt, and builds candidate rounds from them: pairs first, then sets of three to five. For each candidate and each round type, it estimates how much the answer would reduce uncertainty. The measure is BALD (expected information gain). BALD is smarter than "pick the pair closest to 50/50": two items already known to be tied give a 50/50 answer but teach nothing, and BALD sees that. The gain is then divided by how long that kind of round takes this judge, based on their own timing history. Defaults apply until there is history.
 
-## Planner
+The best candidate wins, and its display order is shuffled with the round's seed. The candidates the planner weighed are saved, so `rankify why` can explain the choice. If even the best candidate is below a small floor, the session stops, because nothing left is worth asking.
 
-For each round:
-
-1. Find the items that matter for the mode. For example, Stable uses the top K plus any item whose Could be range overlaps the top K.
-2. Build candidates. Start from the pairs among those items whose Could be ranges overlap most, then extend the best pairs greedily to sets of 3, 4 and 5.
-3. For each candidate set and each round type, compute the expected information gain (BALD): `H[E_θ p(y|θ)] − E_θ H[p(y|θ)]`. This uses 256 posterior draws, over every possible answer `y`: 2 for a pair (3 with "can't decide"), k for `pick`, k! for `rank`.
-4. Divide the gain by the expected seconds for that round type and size.
-5. Pick the highest value. Ties are broken with the round's seed, and the display order is shuffled with the same seed.
-6. If the best gain is below the floor, stop: nothing left is worth asking.
-7. Store the top candidates, with their gain, seconds and value, in `plans`.
-
-Rules:
-
-- A `rank` round has at most 5 items (120 possible answers). The maximum can be configured.
-- Confident ties never go into a `pick` round.
-- In v1, information gain only counts the items that matter for the mode, because candidates are limited to those items. Weighting the gain by goal is a later refinement.
-
-**Timing model.** For each judge, round type and size, we keep the median seconds over the last 20 answers. Until a judge has answers, defaults apply: `pair` 3 s, `pick` of 4: 5 s, `rank` 3: 6 s, `rank` 4: 9 s, `rank` 5: 13 s. These defaults are guesses until the pilot measures real ones.
+Multi-item rounds help only in some situations. Saha & Gopalan (2019) show that with noisy answers, "pick the best of k" is no faster than pairs, while ordering the top m items is about m times faster. So picks pay off mainly when one item clearly stands out, and orderings pay off when a few items are close. The planner doesn't need these as hard-coded rules. They fall out of the gain-per-second scoring.
 
 ## Modes
 
-| Mode | Gives you | Stops when (defaults, adjustable) |
-|---|---|---|
-| Quick | The winner and top 3, the rest in rough tiers | Confidence ≥ 90% for #1 over #2, and ≥ 80% for #2 over #3 and #3 over #4 |
-| Stable | Exact top K, the rest in tiers | Confidence ≥ 90% for every neighbour pair in the top K (K = max(3, ⌈N/4⌉)), and ≥ 90% at each tier boundary below |
-| Exact | Every position | Confidence ≥ 95% for every neighbour pair, or a confident tie |
+Each mode is a confidence target, not a fixed number of rounds.
 
-In every mode, the session also stops when the planner finds nothing worth asking. The tiers below the top K are split at the gaps with the highest neighbour Confidence. There are 3 tiers by default.
+- **Quick** stops when the winner is clear (90% Confidence over #2) and the top 3 are fairly clear (80%). Everything else stays in rough tiers.
+- **Stable** stops when the top of the list (about a quarter of it, at least 3 items) is in a confident order (90%), and the rest falls into confident tiers.
+- **Exact** stops when every neighbouring pair is in a confident order (95%) or is a confident tie.
 
-## Forecast (rounds left)
+You can adjust the thresholds. The benchmark will tune the defaults.
 
-1. Draw 200 score vectors from the current posterior. Treat each one as the truth.
-2. For each, simulate the judge's answers with the fitted model, including ties and position bias. Run a cheap version of the planner (fewer candidates, one Newton step per round) until the stop rule fires.
-3. Report the median and the 10–90% range of rounds and of seconds.
+## Rounds left
 
-The 200 simulations run as one numpy batch in a background thread. The screen shows the previous forecast until the new one is ready.
+To estimate rounds left, rankify plays the rest of the session forward many times in simulation. Each time, it draws plausible "true" scores from the current fit, simulates your answers, and runs a cheap version of the planner until the mode's target is met. The spread of the round counts gives a range like "about 14 (10–19)". This runs in the background, and the screen shows the previous estimate until the new one is ready.
 
 ## Storage
 
-One SQLite file per user, in WAL mode, with STRICT tables and foreign keys on.
+All data lives in one local SQLite file.
 
-**Source of truth**
+The source of truth is a small set of tables: lists, items, judges and rounds. Each round records what was shown, in which order, the answer, how long it took, and its seed. Rounds are only ever added. An undo is a new round that cancels an earlier one. A removed item is hidden from the ranking, but its rounds stay in the fit, because they still say something about the other items.
 
-| Table | Columns |
-|---|---|
-| `lists` | `id`, `slug`, `title`, `settings` (mode, thresholds), `created_at` |
-| `items` | `id`, `list_id`, `name`, `note`, `attributes` (JSON), `added_at`, `removed_at` |
-| `judges` | `id`, `name`, `created_at` |
-| `rounds` | `id`, `list_id`, `judge_id`, `seq`, `kind`, `shown` (item ids in display order), `answer`, `outcome` (`answered`, `cant_decide`, `undo`), `undoes` (round id), `ms`, `seed`, `engine_version`, `created_at` |
+Everything else is derived and can be rebuilt: fits (scores and ranges after each round), plans (what the planner considered), forecasts and logs. Each derived row records which engine version made it and which rounds it used. `rankify verify` rebuilds the derived rows and checks that they match.
 
-**Derived (can be rebuilt)**
+## Code layout
 
-| Table | Columns |
-|---|---|
-| `fits` | `id`, `list_id`, `upto_round_id`, `engine_version`, `iterations`, `ms`, `created_at` |
-| `fit_items` | `fit_id`, `item_id`, `score`, `sd`, `rank`, `rank_lo`, `rank_hi`, `confidence` |
-| `fit_state` | `list_id`, latest covariance and prior settings (one row per list, overwritten) |
-| `plans` | `round_id`, `candidates` (JSON: items, kind, gain, seconds, value), `chosen` |
-| `forecasts` | `fit_id`, `mode`, `rounds_p10`, `rounds_p50`, `rounds_p90`, `seconds_p50`, `ms` |
-| `logs` | `ts`, `level`, `event`, `data` (JSON) |
-
-- An undo is a new round with `outcome = undo` that points at the round it cancels. The fit skips cancelled rounds.
-- A removed item is hidden from the ranking, but its rounds stay in the fit, because they still tell us about the other items.
-- Every derived row records the engine version and the last round it used.
-
-## CLI
-
-```sh
-rankify new <list> "<title>" [--items file.txt]
-rankify add <list> "<item>" [--note "..."]
-rankify play <list> [--mode quick|stable|exact]   # terminal UI
-rankify next <list> [--json]                      # show the next round
-rankify answer <list> <order...> | --cant-decide  # answer it
-rankify undo <list>
-rankify show <list> [--json]
-rankify why <list> --round <n> [--json]
-rankify report <list> [--format md|json]
-rankify verify <list>
-rankify sim [options]                             # see EXPERIMENT.md
+```text
+rankify/
+  engine/     the math; no I/O
+  store/      SQLite; no math
+  cli/        commands (see cli/CLI.md)
+  tui/        the terminal UI
+  report/     the agent report
+  sim/        simulated judges, baselines, benchmark
+tests/
 ```
 
-`next` and `answer` are the testing hook. The terminal UI, the simulator, the tests and an AI agent all drive the same path.
+The engine never touches the database, and the store never does math. The CLI, the terminal UI and the simulator all call the same engine.
 
 ## Agent report
 
-The report comes in Markdown and JSON, and contains:
+The report gives an agent what it needs to dig deeper. It comes in Markdown and JSON, and contains:
 
 - the ranking with Score, Confidence and Could be
 - confident ties
-- weak spots: neighbour pairs never compared directly, and low Confidence
-- slow decisions: the slowest 10% of rounds, which mark close calls
-- upsets: answers the model found unlikely (below 20%), and contradiction loops
+- weak spots, meaning close neighbours that were never compared directly
+- slow decisions, which mark close calls
+- upsets the model can't explain
 - position bias and judge consistency
-- session stats: rounds, seconds, and whether the mode's target was reached
-- with several judges: where they disagree most
+- with several judges, where they disagree
 
 An agent can also query the SQLite file directly.
 
-## Performance budget
+## Speed
 
-| Step | Target (95th percentile, up to 200 items) |
-|---|---|
-| Save answer | < 5 ms |
-| Refit | < 10 ms |
-| Plan next round | < 30 ms |
-| Answer → next round, total | < 50 ms |
-| Forecast, in background | < 1 s |
+From answer to next round should take under 50 ms for lists of up to 200 items. That breaks down into about 5 ms to save, 10 ms to refit and 30 ms to plan. The forecast gets up to a second, in the background. These are targets until measured, and performance tests will enforce them.
 
-These are targets, not measurements. Performance tests enforce them.
+## How the design applies the principles
+
+The numbers refer to [PHILOSOPHY.md](PHILOSOPHY.md).
+
+1. **Attention is scarce.** The planner scores rounds by information gain per second, skips predictable rounds, and stops when nothing clears the floor.
+2. **Answers are evidence.** A probabilistic model, a learned judge consistency, and no hard transitive pruning. Answers the model can't explain are flagged, not dropped.
+3. **Reproducible.** An append-only `rounds` table, one batch fit over all answers, a seed on every round, rebuildable caches, and `rankify verify`.
+4. **Honest certainty.** Ranges on every score, Could be intervals, interval forecasts, and calibration tested in the benchmark.
+5. **Proven before novel.** Bradley–Terry / Plackett–Luce at the core. New methods only in the planner, gated by the benchmark in [EXPERIMENT.md](EXPERIMENT.md).
+6. **Keep up.** A 50 ms budget from answer to next round, warm-started fits, and the forecast in the background.
 
 ## References
 
