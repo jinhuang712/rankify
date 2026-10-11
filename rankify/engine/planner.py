@@ -76,13 +76,14 @@ def bald(mu: np.ndarray, var: np.ndarray) -> np.ndarray:
     return np.maximum(answer_entropy - expected_noise, 0.0)
 
 
-def order_information(mu: np.ndarray, var: np.ndarray) -> np.ndarray:
+def order_information(mu: np.ndarray, var: np.ndarray, nodes: np.ndarray = _NODES) -> np.ndarray:
     """Expected information (bits) about which item is better, from asking the pair once.
 
     ``mu`` and ``var`` describe the posterior of each gap theta_i - theta_j. The answer
-    follows the logistic curve of the gap. Averaged over 64 fixed posterior quantiles.
+    follows the logistic curve of the gap. Averaged over 64 fixed posterior quantiles, or
+    over ``nodes`` (standard-normal quantiles) where speed matters more.
     """
-    d = np.asarray(mu)[:, None] + np.sqrt(np.asarray(var))[:, None] * _NODES[None, :]
+    d = np.asarray(mu)[:, None] + np.sqrt(np.asarray(var))[:, None] * nodes[None, :]
     p_first = 1.0 / (1.0 + np.exp(-d))
     upper = d > 0
     joint = np.stack(
@@ -102,11 +103,13 @@ def order_information(mu: np.ndarray, var: np.ndarray) -> np.ndarray:
     return np.maximum(terms.sum(axis=1), 0.0)
 
 
-def order_information_over(mu: np.ndarray, var: np.ndarray, answers: int) -> np.ndarray:
+def order_information_over(
+    mu: np.ndarray, var: np.ndarray, answers: int, nodes: np.ndarray = _NODES
+) -> np.ndarray:
     """Expected information (bits) about which item is better from ``answers`` more answers to
     the same pair. One answer from a judge who gets a pair right 60% of the time teaches at
     most 0.03 bits, but those bits add up, so this is the right test for "worth asking"."""
-    d = np.asarray(mu)[:, None] + np.sqrt(np.asarray(var))[:, None] * _NODES[None, :]
+    d = np.asarray(mu)[:, None] + np.sqrt(np.asarray(var))[:, None] * nodes[None, :]
     p = 1.0 / (1.0 + np.exp(-d))  # (pairs, nodes)
     s = np.arange(answers + 1)
     comb = np.array([math.comb(answers, int(k)) for k in s], dtype=float)

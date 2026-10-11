@@ -24,6 +24,7 @@ from rankify.engine.baselines import (
 )
 from rankify.engine.calibration import JudgeProfile, estimate_profile
 from rankify.engine.fit import fit_pairs, fit_pairs_learning_sigma, initial_x
+from rankify.engine.forecast import FORECAST_NAME, forecast_rounds
 from rankify.engine.model import A_WINS, B_WINS, TIE, Choices, Pairs, Prior
 from rankify.engine.planner import (
     ALL_KINDS,
@@ -148,6 +149,40 @@ class Refit:
     history: list = field(default_factory=list)  # pair answers, as item positions
     set_rounds: list = field(default_factory=list)  # answered pick and rank rounds
     unanswered_sets: list = field(default_factory=list)  # sets the judge couldn't decide
+
+
+@dataclass(frozen=True)
+class ForecastView:
+    """Rounds left until the mode's target, as a 10–90% range around the median. When too
+    many simulations didn't finish, the median is unknown and ``at_least`` gives a floor."""
+
+    list: str
+    mode: str
+    median: int | None
+    low: int | None
+    high: int | None
+    at_least: int | None
+    sims: int
+    ms: float
+    pairs_only_estimate: bool  # the list also asks picks and orderings; the forecast doesn't
+
+    def as_dict(self) -> dict:
+        return {
+            "median": self.median,
+            "low": self.low,
+            "high": self.high,
+            "at_least": self.at_least,
+            "updating": False,
+        }
+
+    def text(self) -> str:
+        if self.median is None:
+            return f"at least {self.at_least} rounds left"
+        if self.median == 0:
+            return "no rounds left"
+        if self.high is None:
+            return f"about {self.median} rounds left ({self.low} or more)"
+        return f"about {self.median} rounds left ({self.low}–{self.high})"
 
 
 @dataclass(frozen=True)
@@ -460,6 +495,61 @@ class Rankify:
             timing=plan["timing"],
         )
 
+    def forecast(
+        self, slug: str, mode: str | None = None, *, budget_ms: float = 800.0
+    ) -> ForecastView | None:
+        """Rounds left until ``mode``'s target (the list's mode by default), by simulating the
+        rest of the session. A forecast for the same answers, items and mode is reused.
+        ``None`` for methods and lists the planner doesn't drive."""
+        lst = self._list(slug)
+        mode = mode or lst.settings["mode"]
+        if mode not in MODES:
+            raise RankifyError(f"mode must be one of: {', '.join(MODES)}")
+        if _method(lst) != "rankify" or lst.settings.get("repeat_share"):
+            return None
+        upto = store.last_round_id(self.conn, lst.id)
+        active = self._active_ids(lst)
+
+        def view(f) -> ForecastView:
+            return ForecastView(
+                lst.slug,
+                mode,
+                f.median,
+                f.low,
+                f.high,
+                f.at_least,
+                f.sims,
+                f.ms,
+                not _pairs_only(lst),
+            )
+
+        version = f"{ENGINE_VERSION}/{FORECAST_NAME}"
+        saved = store.latest_forecast(self.conn, lst.id, upto, active, mode, version)
+        if saved is not None:
+            return view(saved)
+        args = self.forecast_inputs(slug, mode)
+        assert args is not None
+        f = forecast_rounds(**args, budget_ms=budget_ms)
+        with Transaction(self.conn):
+            store.insert_forecast(self.conn, lst.id, upto, active, mode, f, version)
+        return view(f)
+
+    def forecast_inputs(self, slug: str, mode: str | None = None) -> dict | None:
+        """Everything ``forecast_rounds`` needs, taken from the list as it is now, so the
+        forecast can run on another thread without touching the database."""
+        lst = self._list(slug)
+        if _method(lst) != "rankify" or lst.settings.get("repeat_share"):
+            return None
+        r = self._current(lst)
+        return {
+            "mode": mode or lst.settings["mode"],
+            "theta": r.theta,
+            "cov": r.theta_cov,
+            "active": [p for p, _, _ in r.ranks],
+            "looks": _looks(r),
+            "seed": derive_seed(lst.settings["seed"], r.upto_round_id or 0, 3),
+        }
+
     def calibrate(self, slug: str) -> JudgeProfile:
         """Estimate how this judge answers, from their rounds on one list."""
         lst = self._list(slug)
@@ -725,12 +815,7 @@ class Rankify:
             store.set_timing_samples(self.conn, lst.id, judge),
         )
         ids = r.item_ids
-        looks: Counter = Counter()
-        for a, b, _ in r.history:
-            looks[a] += 1
-            looks[b] += 1
-        for shown, _ in r.set_rounds:
-            looks.update(shown)
+        looks = _looks(r)
         avoid = frozenset(r.unanswered_sets)
         kinds = PAIRS_ONLY if _pairs_only(lst) else ALL_KINDS
         plan = plan_round(mode, r.theta, r.theta_cov, r.ranks, timing, seed, looks, kinds, avoid)
@@ -844,6 +929,17 @@ class Rankify:
 
 def _method(lst: store.ListRow) -> str:
     return lst.settings.get("method", "rankify")
+
+
+def _looks(r: Refit) -> Counter:
+    """How many answered rounds each item position has been shown in."""
+    looks: Counter = Counter()
+    for a, b, _ in r.history:
+        looks[a] += 1
+        looks[b] += 1
+    for shown, _ in r.set_rounds:
+        looks.update(shown)
+    return looks
 
 
 def _pairs_only(lst: store.ListRow) -> bool:

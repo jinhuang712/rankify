@@ -44,6 +44,7 @@ JUDGES = ("human", "perfect", "noisy")
 DEFAULT_JUDGES = ("human", "perfect")
 TARGETS = ("quick", "stable", "exact")
 CONFIRM = 10  # a target counts as reached once it has held for this many more rounds
+FORECAST_AT = (0, 10, 25, 50, 100)  # rounds at which rankify runs forecast rounds left
 ONLINE = ("elo", "glicko2", "trueskill", "openskill")  # update one match at a time
 _PHI = NormalDist()
 
@@ -197,6 +198,8 @@ class RunResult:
     reorder_tau: float | None = None
     ms: dict[str, list[float]] = field(default_factory=dict)
     final_scores: list[float] = field(default_factory=list)  # hidden scores, final ranking order
+    # Rounds-left forecasts: [round, median, low, high, at_least] (goal G7)
+    forecasts: list[list] = field(default_factory=list)
     error: str | None = None  # set when the run crashed; left out of every statistic
 
     def reached(self, target: str) -> int | None:
@@ -307,7 +310,10 @@ def run_one(
         ranking = None
         effort = 0  # fatigue grows per call made: a ranking of k counts as k - 1 pairs
         for _ in range(budget):
-            code, out = cli.call("next", "bench", "--json")
+            if base_method == "rankify" and res.rounds in FORECAST_AT:
+                f = json.loads(cli.ok("forecast", "bench", "--json"))
+                res.forecasts.append([res.rounds, f["median"], f["low"], f["high"], f["at_least"]])
+            code, out = cli.call("next", "bench", "--json", "--no-forecast")
             if code == 3:
                 res.finished = True
                 break
@@ -746,6 +752,7 @@ def _report(
                     lines += _rankify_stops(by, n, j, m)
             if any(m in methods for m in MODED):
                 lines += _ratios(runs_for, methods, n, j) + _round_mix(by, methods, n, j)
+                lines += _forecast_check(by, methods, n, j)
             checkpoints = [c for c in (10, 25, 50, 100, 200, 400) if c <= budget_per_item * n]
             lines += [
                 "",
@@ -972,6 +979,55 @@ def _ratios(runs_for, methods, n: int, j: str) -> list[str]:
                 parts.append(f"{t} {mine / theirs:.0%}")
         lines.append(f"- {mine_m}'s time as a share of {other}'s ({goal}): " + ", ".join(parts))
     return ["", *lines] if lines else []
+
+
+def _forecast_check(by, methods, n: int, j: str) -> list[str]:
+    """Goal G7: how often the forecast's 10–90% range held the rounds really left, and how
+    far its median was off. Lists where rankify stopped by itself count fully. In a list that
+    ran out of budget, the rounds left are unknown but at least the rounds still to go, so a
+    forecast whose range ends below that is a known miss; the others can't be scored."""
+    lines = [
+        "",
+        (
+            "Rounds left (G7: the range holds the actual rounds left 70–90% of the time, the "
+            "median is off by at most 25%). Forecasts made at rounds "
+            + ", ".join(map(str, FORECAST_AT))
+            + ". Lists that ran out of budget add their known misses; their other forecasts "
+            'can\'t be scored and are counted as "Unscored".'
+        ),
+        "",
+        '| Method | Mode | Scored | Range held | Median off by (median) | "At least" | Unscored |',
+        "|---|---|---|---|---|---|---|",
+    ]
+    for m in (x for x in MODED if x in methods):
+        for t in TARGETS:
+            held, off, floors, total, unscored = 0, [], 0, 0, 0
+            for r in by[(n, j, f"{m}:{t}")]:
+                if not r.finished:  # rounds left: at least r.rounds - at
+                    for at, median, _, high, _ in r.forecasts:
+                        if median is not None and high is not None and high < r.rounds - at:
+                            total += 1  # a known miss
+                        else:
+                            unscored += 1
+                    continue
+                for at, median, low, high, at_least in r.forecasts:
+                    actual = r.rounds - at
+                    total += 1
+                    if median is None:
+                        floors += 1
+                        held += actual >= at_least
+                        continue
+                    held += low <= actual and (high is None or actual <= high)
+                    off.append(abs(median - actual) / max(actual, 1))
+            if total or unscored:
+                lines.append(
+                    f"| {m} | {t} | {total} | "
+                    + (f"{held / total:.0%}" if total else "—")
+                    + " | "
+                    + (f"{statistics.median(off):.0%}" if off else "—")
+                    + f" | {floors} | {unscored} |"
+                )
+    return lines if len(lines) > 6 else []
 
 
 def _round_mix(by, methods, n: int, j: str) -> list[str]:

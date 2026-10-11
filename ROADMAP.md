@@ -117,6 +117,36 @@ This phase adds:
 
 **Check:** a full session on a 20-item list in the terminal UI, with no visible wait between rounds, and forecast coverage within target in simulation.
 
+**Result (2026-10-12): the UI and the report pass; the forecast meets G7 only in part.**
+
+What was built:
+
+- `rankify forecast` and rounds left in `next`. The forecast plays the session forward in simulation, with a closed-form update after each simulated answer (see [DESIGN.md](DESIGN.md#rounds-left)). It is saved and reused until the list changes.
+- `rankify play` as a Textual terminal UI: number keys, arranging an ordering with ↑ ↓ and Space, can't decide, undo, and the ranking view. The forecast runs between keypresses. `--plain` keeps the old line-by-line reader.
+- `rankify report`, in Markdown or JSON: ties, weak spots, slow decisions, upsets, the judge's habits, and disagreements between judges.
+- `--json` on every command that prints results (G11), and G7 in the benchmark.
+
+Against the check ([report](experiments/2026-10-12-phase4-forecast.md)):
+
+- **No visible wait (G4):** in a headless 20-item session, the next round is drawn 3.5 ms after the answer key (p95 3.6 ms). A key reaches the UI within 1 ms while a forecast runs. Answer → next round at 200 items with mixed rounds: p95 38 ms. These are simulated sessions, not a person at a terminal.
+- **Forecast coverage (G7), human judge, pairs as shipped:**
+  - **20 items:** met. The 10–90% range held the rounds really left 78% of the time (Quick) and 89% (Stable). The median was off by 22% and 14%.
+  - **10 items:** just short at 67% and 68%, with the median off by 20% and 16%.
+  - **Exact:** not met: 32% on 10 items, and on 20 items no session finished, so it can't be scored.
+- **Where the forecast fails:**
+  - **Mixed lists:** the simulation asks pairs only, so it forecasts 1.3 to 2 times too many rounds.
+  - **A perfect judge:** early forecasts assume answers as noisy as the model's prior, so they run far too long.
+  - **Human answers:** the simulated judge never slips, tires or says "can't decide", which is likely why the human-judge ranges run a little narrow.
+
+Found in review and fixed before the benchmark:
+
+- The forecast's stop check used an approximate normal curve, which moved the 95% and 80% thresholds enough to change when simulations stopped.
+- The forecast didn't pause between simulations, so the UI could wait for it.
+- "Slow decisions" compared orderings with pairs.
+- `play` crashed on a list with fewer than 2 items.
+
+Next: simulating picks and orderings in the forecast, and a judge with slips and fatigue, would address the misses. The human pilot (Phase 5) comes first, because it also measures how long ordering really takes.
+
 ## Phase 5: Human pilot
 
 **Done early (2026-10-12):** the calibration tools are built: `new --calibrate`, a minimal `play`, `calibrate`, and `bench --judge-profile`. The first real calibration session comes next, before Phase 2.

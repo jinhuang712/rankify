@@ -103,3 +103,40 @@ def test_answer_to_next_round_under_50ms(tmp_path):
     )
     assert save < 5
     assert p95 < 50
+
+
+def test_terminal_ui_shows_the_next_round_without_a_visible_wait():
+    """In `rankify play` on 20 items, from an answer key to the next round drawn, while
+    rounds-left forecasts run between keypresses."""
+    import asyncio
+
+    from rankify.tui import PlayApp
+
+    rng = np.random.default_rng(3)
+    names = [f"item-{k:02d}" for k in range(20)]
+    truth = dict(zip(names, rng.normal(0, 1.5, 20), strict=True))
+    rk = Rankify(store.connect(":memory:"))
+    rk.create_list("t", "T", names, seed=3, mode="stable")
+    app = PlayApp(rk, "t", rounds=12)
+    times = []
+    submit = app.submit
+
+    def timed(numbers):
+        t0 = time.perf_counter()
+        submit(numbers)
+        times.append((time.perf_counter() - t0) * 1000)
+
+    app.submit = timed
+
+    async def go() -> None:
+        async with app.run_test(size=(110, 40)) as pilot:
+            await pilot.pause()
+            while not app.done:
+                a, b = (truth[i.name] for i in app.view.items)
+                await pilot.press("1" if a > b else "2")
+
+    asyncio.run(go())
+    p95 = sorted(times)[int(0.95 * (len(times) - 1))]
+    print(f"terminal UI, answer -> next round drawn: median {statistics.median(times):.1f} ms, "
+          f"p95 {p95:.1f} ms")  # fmt: skip
+    assert len(times) == 12 and p95 < 50

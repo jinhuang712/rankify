@@ -1,14 +1,14 @@
 # rankify CLI
 
-> **Partly built.** Working now:
+> **Mostly built.** Working now:
 >
 > - `new` (with `--method`, `--rounds` and `--calibrate`), `add`, `remove` and `lists`
-> - `next`: the rankify planner, with `--mode` to override the list's mode. It asks pairs, or with `new --rounds mixed` also picks and orderings of 3 to 5 items
-> - `answer`, `undo` and a minimal `play`
-> - `show`, which reports whether the mode's target is reached, and `why`
+> - `next`: the rankify planner, with `--mode` to override the list's mode and an estimate of rounds left. It asks pairs, or with `new --rounds mixed` also picks and orderings of 3 to 5 items
+> - `answer`, `undo`, and `play`, the terminal UI
+> - `show`, `why`, `forecast` and `report`
 > - `verify`, `bench` and `calibrate`
 >
-> Everything else here is planned. `next` exits with code 3 when the mode's target is reached or nothing is left worth asking. `next --json` returns `"rounds_left": null` until the forecast exists (Phase 4).
+> Still planned: `show --tiers`, `export`, `import` and `rebuild`. `next` exits with code 3 when the mode's target is reached or nothing is left worth asking. Every command that prints results takes `--json`.
 
 The CLI is the main way to use rankify, and also the way rankify is tested. The terminal UI, the simulator, the test suite and AI agents all drive the same commands.
 
@@ -33,41 +33,37 @@ A list asks pairs ("which is better?") unless it is made with `--rounds mixed`. 
 
 ## Rank in the terminal UI
 
-**Built now: a minimal version.** `rankify play` shows one round at a time and reads single keys. For a pair or a pick, press the item's number. To put items in order, press their numbers best first. The last one fills itself in, and Backspace takes back a key. `t` is can't decide, `u` undoes the last answer, and `q` quits. It times each answer from when the question appears to the last keypress. It needs a real terminal, because it reads keys without Enter.
-
 ```sh
-rankify play travel               # until you press q
-rankify play travel --rounds 150  # stop after 150 answers
-```
-
-**Planned (Phase 4): the full terminal UI below.**
-
-```sh
-rankify play travel --mode quick
+rankify play travel               # until the mode's target, or until you press q
+rankify play travel --mode quick  # this session in another mode
+rankify play travel --rounds 20   # stop after 20 answers
 ```
 
 ```text
- Best NBA player ever                  Stable · ~14 rounds left (10–19)
- ──────────────────────────────────────────────────────────────────────
+ Best NBA player ever · Stable · ~14 rounds left (10–19) · 22 answered
+
  Round 23 · Put these in order, best first
 
-   1  Michael Jordan
+ > 1  Michael Jordan
    2  LeBron James
    3  Kareem Abdul-Jabbar
 
- > 2 1 3                    [t] can't decide   [u] undo   [r] ranking
+ > 2 1
+ Type the numbers best first, or arrange with ↑ ↓ and Space, then Enter.
 ```
 
-To answer, type the numbers in order, best first, and press Enter. For a pair or a pick, one number is enough. You can also move items with ↑, ↓ and Space, then press Enter.
+For a pair or a pick, press the item's number. For an ordering, type the numbers best first: the last one fills itself in, and Backspace takes back a key. You can also arrange the items: ↑ and ↓ move the cursor, Space picks up the item under it (then ↑ and ↓ move the item), Space puts it down, and Enter answers.
 
 The other keys:
 
 - `t`: can't decide
 - `u`: undo the last answer
-- `r`: show the current ranking (hidden by default, so it doesn't sway you)
+- `r`: show or hide the current ranking (hidden by default, so it doesn't sway you)
 - `q`: quit
 
-Progress is saved after every answer.
+Each answer is timed from when the round appears to the last key, and saved at once. Rounds left are worked out between keypresses, so the next round never waits for them. Until the new estimate is ready, the header shows the last one, marked "updating".
+
+When input or output isn't a terminal, `play` reads keys line by line instead (`--plain` forces this).
 
 ## Rank one round at a time
 
@@ -97,8 +93,14 @@ For a pair or a pick, give one number: the better or the best item. For an order
 rankify show travel               # Score, Confidence, Could be
 rankify show travel --tiers       # grouped into tiers
 rankify why travel --round 17     # why that round was asked
-rankify report travel --format md # report for an AI agent; md or json
+rankify forecast travel           # rounds left, in the list's mode
+rankify report travel             # report for an AI agent, in Markdown
+rankify report travel --format json
 ```
+
+`forecast` plays the rest of the session forward about 30 to 60 times in simulation (see [DESIGN.md](../../DESIGN.md#rounds-left)) and gives the median and the 10–90% range of the rounds left. It takes up to a second, and a forecast is saved and reused until the list changes. `next` shows the same estimate; `next --no-forecast` skips it. When too many simulations run out of time, the answer is "at least N rounds". On a list made with `--rounds mixed`, the simulation still asks pairs only, so it can overestimate.
+
+`report` gives an agent what it needs to dig deeper: the ranking with Score, Confidence and Could be; confident ties; weak spots (close neighbours never compared directly); slow decisions; upsets the final scores can't explain; the judge's position bias and consistency; and with several judges, where they disagree.
 
 `why` lists the rounds the planner weighed, best first: pairs, picks and orderings. For each it shows the expected bits about the order of the shown items, counting only the pairs that matter for the mode, and the expected answer time. `--json` adds how likely the first item of a pair was to win, and the planner's time guesses for each kind and size of round. It works for rounds the planner chose. Calibration repeats, undos and baseline methods have no plan to show.
 
@@ -158,7 +160,7 @@ The JSON output uses the same plain words as the screen.
     {"n": 2, "id": "lebron", "name": "LeBron James"},
     {"n": 3, "id": "kareem", "name": "Kareem Abdul-Jabbar"}
   ],
-  "rounds_left": {"median": 14, "low": 10, "high": 19, "updating": false}
+  "rounds_left": {"median": 14, "low": 10, "high": 19, "at_least": null, "updating": false}
 }
 ```
 

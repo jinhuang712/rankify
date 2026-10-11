@@ -8,7 +8,14 @@ from typing import Annotated, NoReturn
 import typer
 
 from rankify import store
-from rankify.service import NothingToAsk, Rankify, RankifyError, RankingView, RoundView
+from rankify.service import (
+    ForecastView,
+    NothingToAsk,
+    Rankify,
+    RankifyError,
+    RankingView,
+    RoundView,
+)
 
 DEFAULT_DB = Path.home() / ".rankify" / "rankify.db"
 EXIT_NOTHING_TO_ASK = 3
@@ -85,6 +92,7 @@ def new(
             "save time in the benchmark yet.",
         ),
     ] = "pairs",
+    as_json: JsonOpt = False,
 ) -> None:
     """Make a new list."""
     names = items.read_text(encoding="utf-8").splitlines() if items else []
@@ -102,6 +110,9 @@ def new(
     except RankifyError as e:
         _fail(str(e))
     count = len([n for n in names if n.strip()])
+    if as_json:
+        _emit_json({"list": slug, "items": count, "made": True})
+        return
     typer.echo(f"Made '{slug}' with {count} item{'s' if count != 1 else ''}.")
 
 
@@ -111,12 +122,16 @@ def add(
     slug: Slug,
     name: Annotated[str, typer.Argument(help="The item to add.")],
     note: Annotated[str | None, typer.Option("--note", help="A note for yourself.")] = None,
+    as_json: JsonOpt = False,
 ) -> None:
     """Add an item to a list."""
     try:
         _service(ctx).add_item(slug, name, note)
     except RankifyError as e:
         _fail(str(e))
+    if as_json:
+        _emit_json({"list": slug, "added": name})
+        return
     typer.echo(f"Added '{name}'.")
 
 
@@ -125,12 +140,16 @@ def remove(
     ctx: typer.Context,
     slug: Slug,
     name: Annotated[str, typer.Argument(help="The item to remove.")],
+    as_json: JsonOpt = False,
 ) -> None:
     """Hide an item from the ranking. Its answers still count."""
     try:
         _service(ctx).remove_item(slug, name)
     except RankifyError as e:
         _fail(str(e))
+    if as_json:
+        _emit_json({"list": slug, "removed": name})
+        return
     typer.echo(f"Removed '{name}'.")
 
 
@@ -154,8 +173,9 @@ def lists_(ctx: typer.Context, as_json: JsonOpt = False) -> None:
 # ---------------------------------------------------------------- rounds
 
 
-def _print_round(view: RoundView) -> None:
-    typer.echo(f"Round {view.round} · {view.prompt}\n")
+def _print_round(view: RoundView, forecast: ForecastView | None = None) -> None:
+    left = f" · {forecast.text()}" if forecast else ""
+    typer.echo(f"Round {view.round}{left}\n{view.prompt}\n")
     for item in view.items:
         typer.echo(f"  {item.n}  {item.name}")
     if view.kind == "rank":
@@ -166,14 +186,14 @@ def _print_round(view: RoundView) -> None:
     typer.echo(f"\nAnswer with: rankify answer {view.list} {how}   (or --cant-decide)")
 
 
-def _round_json(view: RoundView) -> dict:
+def _round_json(view: RoundView, forecast: ForecastView | None = None) -> dict:
     return {
         "list": view.list,
         "round": view.round,
         "kind": view.kind,
         "prompt": view.prompt,
         "items": [{"n": i.n, "id": i.id, "name": i.name} for i in view.items],
-        "rounds_left": None,  # the forecast arrives in Phase 4
+        "rounds_left": forecast.as_dict() if forecast else None,
     }
 
 
@@ -189,19 +209,52 @@ def next_(
     as_json: JsonOpt = False,
     judge: JudgeOpt = "me",
     mode: ModeOpt = None,
+    no_forecast: Annotated[
+        bool,
+        typer.Option(
+            "--no-forecast", help="Skip the rounds-left estimate, which can take up to a second."
+        ),
+    ] = False,
 ) -> None:
     """Show the open round, or start a new one. Exits with code 3 when nothing is left to ask."""
+    rk = _service(ctx, judge)
     try:
-        view = _service(ctx, judge).next_round(slug, mode=mode)
+        view = rk.next_round(slug, mode=mode)
+        forecast = None if no_forecast else rk.forecast(slug, mode)
     except NothingToAsk as e:
         typer.echo(str(e), err=True)
         raise typer.Exit(EXIT_NOTHING_TO_ASK) from None
     except RankifyError as e:
         _fail(str(e))
     if as_json:
-        _emit_json(_round_json(view))
+        _emit_json(_round_json(view, forecast))
     else:
-        _print_round(view)
+        _print_round(view, forecast)
+
+
+@app.command()
+def forecast(
+    ctx: typer.Context, slug: Slug, mode: ModeOpt = None, as_json: JsonOpt = False
+) -> None:
+    """Estimate how many rounds are left until the mode's target, by simulating the rest of
+    the session."""
+    try:
+        f = _service(ctx).forecast(slug, mode)
+    except RankifyError as e:
+        _fail(str(e))
+    if as_json:
+        _emit_json(
+            None
+            if f is None
+            else {"list": f.list, "mode": f.mode, **f.as_dict(), "sims": f.sims, "ms": f.ms}
+        )
+        return
+    if f is None:
+        typer.echo("No forecast: only lists ranked by rankify's planner have one.")
+        return
+    typer.echo(f"{f.mode.capitalize()}: {f.text()} ({f.sims} simulations, {f.ms:.0f} ms).")
+    if f.pairs_only_estimate:
+        typer.echo("The simulation asks pairs only, so this list may need fewer rounds.")
 
 
 @app.command()
@@ -316,17 +369,47 @@ def show(ctx: typer.Context, slug: Slug, as_json: JsonOpt = False) -> None:
 
 
 @app.command()
-def verify(ctx: typer.Context, slug: Slug) -> None:
+def verify(ctx: typer.Context, slug: Slug, as_json: JsonOpt = False) -> None:
     """Rebuild the ranking from the answer log alone and compare it with what is stored."""
     try:
         problems = _service(ctx).verify(slug)
     except RankifyError as e:
         _fail(str(e))
+    if as_json:
+        _emit_json({"list": slug, "ok": not problems, "problems": problems})
+        if problems:
+            raise typer.Exit(1)
+        return
     if problems:
         for p in problems:
             typer.echo(f"mismatch: {p}", err=True)
         raise typer.Exit(1)
     typer.echo("OK: the stored ranking matches a rebuild from the answer log.")
+
+
+@app.command()
+def report(
+    ctx: typer.Context,
+    slug: Slug,
+    fmt: Annotated[
+        str, typer.Option("--format", help="md (Markdown) or json.", case_sensitive=False)
+    ] = "md",
+    as_json: JsonOpt = False,
+) -> None:
+    """A report for an agent: the ranking, ties, weak spots, slow decisions, upsets and the
+    judge's habits."""
+    from rankify.report import build, markdown
+
+    if fmt.lower() not in ("md", "json"):
+        _fail("--format must be md or json")
+    try:
+        data = build(_service(ctx), slug)
+    except RankifyError as e:
+        _fail(str(e))
+    if as_json or fmt.lower() == "json":
+        _emit_json(data)
+    else:
+        typer.echo(markdown(data))
 
 
 @app.command()
@@ -454,15 +537,36 @@ def play(
     ] = None,
     judge: JudgeOpt = "me",
     mode: ModeOpt = None,
+    plain: Annotated[
+        bool,
+        typer.Option(
+            "--plain",
+            help="Read keys line by line instead of opening the terminal UI. Used when input "
+            "or output isn't a terminal.",
+        ),
+    ] = False,
 ) -> None:
-    """Answer rounds with single keypresses. Times each answer from question to key.
+    """Answer rounds in the terminal UI, timing each answer from question to last key.
 
     Stops by itself when the mode's target is reached or nothing is worth asking.
-    A minimal stand-in until the full terminal UI (Phase 4).
     """
+    import sys
     import time
 
     rk = _service(ctx, judge)
+    if not plain and sys.stdin.isatty() and sys.stdout.isatty():
+        from rankify.tui import run
+
+        try:
+            rk.ranking(slug)  # fail early, with a plain message, on a missing list
+        except RankifyError as e:
+            _fail(str(e))
+        answered = run(rk, slug, mode, rounds)
+        typer.echo(
+            f"{answered} answer{'s' if answered != 1 else ''} this session. "
+            f"See the ranking with: rankify show {slug}"
+        )
+        return
     answered = 0
     typer.echo(f"{PLAY_KEYS}\n")
     while rounds is None or answered < rounds:

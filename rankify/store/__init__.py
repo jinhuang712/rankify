@@ -132,6 +132,23 @@ CREATE TABLE IF NOT EXISTS plans (
     candidates TEXT NOT NULL,
     timing TEXT NOT NULL
 ) STRICT;
+
+-- Rounds left, forecast for one state of the answer log and one mode.
+CREATE TABLE IF NOT EXISTS forecasts (
+    id INTEGER PRIMARY KEY,
+    list_id INTEGER NOT NULL REFERENCES lists(id),
+    upto_round_id INTEGER,
+    items TEXT NOT NULL,
+    mode TEXT NOT NULL,
+    median INTEGER,
+    low INTEGER,
+    high INTEGER,
+    at_least INTEGER,
+    sims INTEGER NOT NULL,
+    ms REAL NOT NULL,
+    engine_version TEXT NOT NULL,
+    created_at TEXT NOT NULL
+) STRICT;
 """
 
 
@@ -236,6 +253,16 @@ def mark_removed(conn, item_id: int) -> None:
     conn.execute(
         "UPDATE items SET removed_at = ? WHERE id = ? AND removed_at IS NULL", (now(), item_id)
     )
+
+
+def judge_names(conn) -> dict[int, str]:
+    return {r["id"]: r["name"] for r in conn.execute("SELECT id, name FROM judges")}
+
+
+def round_numbers(conn, list_id: int) -> dict[int, int]:
+    """Query id -> the round number the judge saw."""
+    rows = conn.execute("SELECT id, seq FROM queries WHERE list_id = ?", (list_id,))
+    return {r["id"]: r["seq"] for r in rows}
 
 
 def judge_id(conn, name: str) -> int:
@@ -530,6 +557,65 @@ def plan_for_round(conn, list_id: int, seq: int) -> dict | None:
         "candidates": json.loads(row["candidates"]),
         "timing": json.loads(row["timing"]),
     }
+
+
+# ---------------------------------------------------------------- derived: forecasts
+
+
+@dataclass(frozen=True)
+class ForecastRow:
+    median: int | None
+    low: int | None
+    high: int | None
+    at_least: int | None
+    sims: int
+    ms: float
+    created_at: str
+
+
+def insert_forecast(
+    conn, list_id: int, upto_round_id, items: list, mode: str, f, engine_version: str
+) -> None:
+    conn.execute(
+        "INSERT INTO forecasts(list_id, upto_round_id, items, mode, median, low, high, at_least,"
+        " sims, ms, engine_version, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            list_id,
+            upto_round_id,
+            json.dumps(items),
+            mode,
+            f.median,
+            f.low,
+            f.high,
+            f.at_least,
+            f.sims,
+            f.ms,
+            engine_version,
+            now(),
+        ),
+    )
+
+
+def latest_forecast(
+    conn, list_id: int, upto_round_id, items: list, mode: str, engine_version: str
+) -> ForecastRow | None:
+    """The newest forecast made for exactly this state of the list, if any."""
+    row = conn.execute(
+        "SELECT * FROM forecasts WHERE list_id = ? AND upto_round_id IS ? AND items = ?"
+        " AND mode = ? AND engine_version = ? ORDER BY id DESC LIMIT 1",
+        (list_id, upto_round_id, json.dumps(items), mode, engine_version),
+    ).fetchone()
+    if row is None:
+        return None
+    return ForecastRow(
+        row["median"],
+        row["low"],
+        row["high"],
+        row["at_least"],
+        row["sims"],
+        row["ms"],
+        row["created_at"],
+    )
 
 
 def timing_samples(conn, list_id: int, judge: int) -> list[tuple[float, float]]:

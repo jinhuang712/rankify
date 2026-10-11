@@ -238,3 +238,11 @@ Results go in `experiments/`, one report per run, linked from here.
   - **Pairs only (as shipped):** 10-item Quick took 64% of Elo's time and 75% of Just Sort It's. 10-item Stable took 66% and 94%. 20-item Quick took 26% and 57%. These are close to the Phase 2 v2 numbers.
   - **Stopping:** on 10 items, mixed rounds stopped sooner (Quick 3.6 min against 4.0, Stable 5.1 against 5.9), and the true #1 was on top at every Quick stop (20 of 20; pairs 17 of 20). On 20 items they stopped a little later. Exact stopped with 88% of neighbour pairs right on 10 items and 78% on 20, short of G8's 95%. Pairs only reached 94% on 10 items, and on 20 items it never stopped in Exact.
   - **Calibration:** error 0.041–0.047 for mixed rounds and 0.043–0.048 for pairs (G5 met). The #1 never changed when answers were replayed in another order (0 of 80 for both).
+- **Phase 4 forecast checks** (seeds 70000+, which the benchmark never uses; 5–6 lists per setting, human judge).
+  - The first forecast planned pairs without weighting them by the mode. In Quick it spread questions over every item still in play and never stopped: it said about twice the real rounds left.
+  - Weighting by a normal approximation of each rank broke differently. That approximation treats "j is above i" as independent for every j, so ranks look far too certain early on, and the forecast said "0 rounds left" right after first looks.
+  - With posterior draws instead, the range held 61% of the time on 10-item Quick and 100% on 10-item Stable.
+- [2026-10-12: Phase 4, rounds left](experiments/2026-10-12-phase4-forecast.md). 1,120 runs, none failed. The 640 baseline runs were reused from Phase 3, because their code didn't change.
+  - **G7, human judge, pairs as shipped:** the range held 78% (Quick) and 89% (Stable) on 20 items, and 67% and 68% on 10 items. The median was off by 14–22%. Exact: 32% on 10 items, and unscorable on 20.
+  - **G7 fails** on mixed lists (the forecast plans pairs only: medians off by 130–200%) and with the perfect judge (forecasts too long early on: medians off by 80–190%).
+  - Rankings, calibration and every other number match the Phase 3 benchmark exactly; the forecast doesn't change which rounds are asked.

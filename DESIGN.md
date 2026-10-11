@@ -82,7 +82,15 @@ In every mode, a confident tie (at least 90% likely to be within 30 Score points
 
 ## Rounds left
 
-To estimate rounds left, rankify plays the rest of the session forward many times in simulation. Each time, it draws plausible "true" scores from the current fit, simulates your answers, and runs a cheap version of the planner until the mode's target is met. The spread of the round counts gives a range like "about 14 (10–19)". This runs in the background, and the screen shows the previous estimate until the new one is ready.
+To estimate rounds left, rankify plays the rest of the session forward many times in simulation. Each time, it draws plausible "true" scores from the current fit, simulates your answers the way the model expects them, and runs a cheap version of the planner until it would stop. The spread of the round counts gives a range like "about 14 (10–19)": the median, and the 10th to 90th percentile.
+
+The cheap planner keeps the real one's rules: first looks, pairs weighted by how much they matter for the mode, the mode's target, and the 8-answer floor. It plans pairs only, so on a list with mixed rounds it can overestimate.
+
+Refitting after every simulated answer would be far too slow. Instead each answer updates the fit's Gaussian in closed form, with the moment-matching step TrueSkill uses for a game (Herbrich, Minka & Graepel 2007). The logistic curve is matched by a probit curve with scale 1.702, and for a probit answer the step gives the exact posterior mean. Could be and each pair's weight come from 96 posterior draws, refreshed every 4 simulated answers. A first version estimated ranks with a normal approximation that treated "j is above i" as independent for every j. That made ranks far too certain early on, and the forecast said "0 rounds left" right after first looks.
+
+A forecast takes up to about a second, so it runs about 30 to 60 simulations within an 0.8 s budget. On a large list a simulation can run out of time; it then counts only as "at least this many", and if that leaves the median unknown, the answer is "at least N rounds". In the terminal UI the forecast runs a few simulated rounds at a time between keypresses, and the header shows the previous estimate, marked "updating", until the new one is ready. A forecast is saved, keyed by the answer log, the items and the mode, and reused until one of them changes.
+
+The simulated judge answers exactly as the model expects. A real person also makes slips, tires, and can't decide, so real sessions run longer and vary more than the forecast says. Goal G7 measures how much that matters (see the Phase 4 benchmark).
 
 ## Storage
 
@@ -100,9 +108,9 @@ rankify/
   store/      SQLite; no math
   service.py  ties the engine to the store; everything else calls this
   cli/        commands (see cli/CLI.md)
-  tui/        the terminal UI
-  report/     the agent report
-  sim/        simulated judges, baselines, benchmark
+  tui.py      the terminal UI (Textual)
+  report.py   the agent report
+  bench.py    the benchmark; the simulated judges are in engine/judge.py
 tests/
 ```
 
@@ -120,18 +128,20 @@ The report gives an agent what it needs to dig deeper. It comes in Markdown and 
 - position bias and judge consistency
 - with several judges, where they disagree
 
+Upsets are answers the final scores give less than a 10% chance. Slow decisions are answers that took more than twice the same judge's median for the same kind and size of round, once there are 5 of them (ordering five items always takes longer than a pair). A weak spot is a neighbour pair below the mode's confidence level (95% in Exact, 90% otherwise) whose two items never met in a round. Consistency compares how many of the judge's pairwise statements (a pick says the pick beat each other item; an ordering says each item beat every one below it) agree with the final ranking, against how many would if the model were exactly right. The report is `rankify report` in Markdown, or JSON with `--format json`.
+
 An agent can also query the SQLite file directly.
 
 ## Speed
 
 From answer to next round should take under 50 ms for lists of up to 200 items. That breaks down into about 5 ms to save, 10 ms to refit and 30 ms to plan. The forecast gets up to a second, in the background. Performance tests enforce these targets.
 
-Measured on 2026-10-12, for 200 items:
+Measured on 2026-10-12 (Phase 4), for 200 items, on a list with mixed rounds (the slower kind):
 
-- Saving an answer takes 0.02 ms.
-- A refit with a fixed width takes 5 ms. Learning the width raises a warm refit to about 19 ms, over its 10 ms share.
-- Answer to next round takes 41 ms at the median and 46 ms at the 95th percentile. That is inside the 50 ms target, with little to spare.
-- Lists of 50 items or fewer take a few milliseconds per round.
+- Saving an answer takes 0.02 ms, and a warm refit with a fixed width 3.5 ms.
+- Answer to next round takes 31 ms at the median and 38 ms at the 95th percentile. Asking the next round reuses the fit the answer just made, instead of fitting twice.
+- The forecast stays within its budget of about a second.
+- In the terminal UI on 20 items, the next round is drawn 3.5 ms after the answer key, and a key reaches the UI within 1 ms while a forecast runs.
 
 ## How the design applies the principles
 

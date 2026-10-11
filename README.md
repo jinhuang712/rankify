@@ -2,16 +2,18 @@
 
 Rank anything by answering a few quick questions, with real statistics behind every answer.
 
-> **Status: Phase 3 done.** rankify picks each pair by how much it teaches about the order you care about. It stops when your mode's confidence target is reached or nothing is left worth asking, and `rankify why` explains any question. Against a simulated human judge on 20 items, it reaches the right top 3 in about a quarter of Elo's time. Lists made with `--rounds mixed` also ask "pick the best" and "put these in order" for 3–5 items. In the benchmark that saved time only if ordering is quicker than our guess, so it isn't the default until real answer times are measured (see [ROADMAP.md](ROADMAP.md#phase-3-mixed-rounds) and [EXPERIMENT.md](EXPERIMENT.md#results)).
+> **Status: Phase 4 done.** rankify picks each pair by how much it teaches about the order you care about. It stops when your mode's confidence target is reached or nothing is left worth asking, and `rankify why` explains any question. Against a simulated human judge on 20 items, it reaches the right top 3 in about a quarter of Elo's time. `rankify play` is a terminal UI that shows about how many rounds are left, and `rankify report` writes a report an AI agent can dig into. Lists made with `--rounds mixed` also ask "pick the best" and "put these in order" for 3–5 items. That isn't the default until real answer times are measured (see [ROADMAP.md](ROADMAP.md) and [EXPERIMENT.md](EXPERIMENT.md#results)).
 
 ## Try it
 
 ```sh
 uv sync
 uv run rankify new travel "Places I want to go" --items places.txt
-uv run rankify next travel
-uv run rankify answer travel 1
+uv run rankify play travel        # answer rounds in the terminal UI; q to stop
 uv run rankify show travel
+uv run rankify report travel      # a report for an AI agent
+uv run rankify next travel        # or one round at a time, for scripts:
+uv run rankify answer travel 1
 uv run rankify bench --runs 5     # compare against Elo and other rating systems
 uv run pytest
 ```
@@ -79,7 +81,7 @@ The books, papers and software that rankify builds on or measures itself against
 - Elo, A. E. (1978). *The Rating of Chessplayers, Past and Present*. Arco.
 - Glickman, M. E. (1999). Parameter estimation in large dynamic paired comparison experiments. *Applied Statistics*. The Glicko system, the first to give ratings a deviation.
 - Glickman, M. E. (2001). Dynamic paired comparison models with stochastic variances. *Journal of Applied Statistics*. Glicko-2.
-- Herbrich, R., Minka, T. & Graepel, T. (2007). TrueSkill: a Bayesian skill rating system. *Advances in Neural Information Processing Systems 19*.
+- Herbrich, R., Minka, T. & Graepel, T. (2007). TrueSkill: a Bayesian skill rating system. *Advances in Neural Information Processing Systems 19*. Its moment-matching update is also how rankify's rounds-left forecast updates a simulated fit after each simulated answer.
 - Weng, R. C. & Lin, C.-J. (2011). A Bayesian approximation method for online ranking. *Journal of Machine Learning Research*. The method behind openskill.
 - † LMSYS (2023). [Chatbot Arena: new models & Elo system update](https://lmsys.org/blog/2023-12-07-leaderboard). Chatbot Arena moved from online Elo to a Bradley–Terry fit for more stable ratings.
 
@@ -111,6 +113,7 @@ The books, papers and software that rankify builds on or measures itself against
 ### Software
 
 - † [choix](https://pypi.org/project/choix/) (Maystre): Bradley–Terry and Plackett–Luce fits. Our reference in tests.
+- † [Textual](https://pypi.org/project/textual/) (Textualize): the terminal UI behind `rankify play`.
 - † [openskill](https://pypi.org/project/openskill/), † [trueskill](https://pypi.org/project/trueskill/) and † [glicko2](https://pypi.org/project/glicko2/): the rating systems in the benchmark.
 - † [corsort](https://pypi.org/project/corsort): research on sorts that give a useful result when stopped early.
 

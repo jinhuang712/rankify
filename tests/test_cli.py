@@ -36,7 +36,9 @@ def test_full_session_through_the_cli(tmp_path):
     round_ = json.loads(result.output)
     assert round_["kind"] == "pair"
     assert [i["n"] for i in round_["items"]] == [1, 2]
-    assert round_["rounds_left"] is None
+    left = round_["rounds_left"]
+    assert set(left) == {"median", "low", "high", "at_least", "updating"}
+    assert left["low"] <= left["median"] <= left["high"]
 
     result = call(db, "answer", "travel", "2", "--round", str(round_["round"]))
     assert result.exit_code == 0, result.output
@@ -101,7 +103,7 @@ def test_rank_rounds_through_the_cli_and_play(tmp_path):
         "mixed",
     )
     for _ in range(40):
-        round_ = json.loads(call(db, "next", "r", "--json").output)
+        round_ = json.loads(call(db, "next", "r", "--json", "--no-forecast").output)
         if round_["kind"] == "rank":
             break
         call(db, "answer", "r", "1")
