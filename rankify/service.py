@@ -4,7 +4,7 @@ import re
 import secrets
 from collections import Counter
 from collections.abc import Sequence
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from time import perf_counter
 
@@ -24,12 +24,24 @@ from rankify.engine.baselines import (
 )
 from rankify.engine.calibration import JudgeProfile, estimate_profile
 from rankify.engine.fit import fit_pairs, fit_pairs_learning_sigma, initial_x
-from rankify.engine.model import A_WINS, B_WINS, TIE, Pairs, Prior
-from rankify.engine.planner import PLANNER_NAME, Timing, derive_seed, plan_pair, random_pair
+from rankify.engine.model import A_WINS, B_WINS, TIE, Choices, Pairs, Prior
+from rankify.engine.planner import (
+    ALL_KINDS,
+    MIXED_PLANNER_NAME,
+    PAIRS_ONLY,
+    PLANNER_NAME,
+    Timing,
+    derive_seed,
+    plan_round,
+    random_pair,
+)
 from rankify.engine.stats import SCORE_SCALE, summarize
 from rankify.store import Transaction
 
 MODES = ("quick", "stable", "exact")
+# pairs is the default: mixed rounds (pairs, "pick the best" and "put in order") did not save
+# time in the Phase 3 benchmark (goal G3), so they stay behind `new --rounds mixed`.
+ROUNDS = ("pairs", "mixed")
 # "rankify" is the product. The others exist so rankify can be benchmarked against them
 # through exactly the same commands.
 METHODS = (
@@ -133,6 +145,9 @@ class Refit:
     theta: np.ndarray | None = None  # scores and covariance, for methods that have them
     theta_cov: np.ndarray | None = None
     ranks: list[tuple[int, int, int]] | None = None  # (position, rank_lo, rank_hi), best first
+    history: list = field(default_factory=list)  # pair answers, as item positions
+    set_rounds: list = field(default_factory=list)  # answered pick and rank rounds
+    unanswered_sets: list = field(default_factory=list)  # sets the judge couldn't decide
 
 
 @dataclass(frozen=True)
@@ -151,6 +166,7 @@ class Rankify:
     def __init__(self, conn, judge: str = "me"):
         self.conn = conn
         self.judge = judge
+        self._fits: dict[int, tuple[tuple, Refit]] = {}  # list id -> (state key, its fit)
 
     # ------------------------------------------------------------ lists and items
 
@@ -164,9 +180,11 @@ class Rankify:
         method: str = "rankify",
         seed: int | None = None,
         calibrate: bool = False,
+        rounds: str = "pairs",
     ) -> None:
         """Make a list. ``calibrate`` mixes in repeats of earlier pairs, with the sides swapped,
-        so ``calibrate()`` can measure how consistent the judge is."""
+        so ``calibrate()`` can measure how consistent the judge is. ``rounds`` is "pairs" or
+        "mixed" (pairs, picks and rankings); other methods and calibration ask pairs."""
         if not _SLUG.match(slug):
             raise RankifyError(
                 "a list name uses lowercase letters, digits and dashes, like 'nba-goat'"
@@ -175,6 +193,8 @@ class Rankify:
             raise RankifyError(f"mode must be one of: {', '.join(MODES)}")
         if method not in METHODS:
             raise RankifyError(f"method must be one of: {', '.join(METHODS)}")
+        if rounds not in ROUNDS:
+            raise RankifyError(f"rounds must be one of: {', '.join(ROUNDS)}")
         if store.get_list(self.conn, slug):
             raise RankifyError(f"list '{slug}' already exists")
         names = _clean_names(items)
@@ -184,6 +204,7 @@ class Rankify:
             "seed": secrets.randbits(62) if seed is None else int(seed),
             "prior": asdict(Prior(sigma=ARENA_SIGMA) if method == "arena" else Prior()),
             "learn_sigma": method in _LEARNS_SIGMA,
+            "rounds": rounds if method == "rankify" and not calibrate else "pairs",
         }
         if calibrate:
             if method != "rankify":
@@ -255,23 +276,24 @@ class Rankify:
                     raise RankifyError(f"'{slug}' needs at least 2 items to rank")
                 seq = store.next_seq(self.conn, lst.id)
                 seed = derive_seed(lst.settings["seed"], seq)
-                plan = None
+                plan, kind = None, "pair"
                 if _method(lst) == "rankify" and lst.settings.get("repeat_share"):
                     # Calibration lists keep the design the calibration was validated on:
                     # random pairs, some repeated with the sides swapped.
                     repeat = self._calibration_repeat(lst, active, seed)
-                    pair = repeat or random_pair(np.array(active), seed)
+                    shown = repeat or random_pair(np.array(active), seed)
                     planner = "calibration-repeat" if repeat else "calibration-random"
                 elif _method(lst) == "rankify":
-                    plan, pair = self._smart_plan(lst, judge, mode, seed)
-                    planner = PLANNER_NAME
+                    plan, chosen = self._smart_plan(lst, judge, mode, seed)
+                    kind, shown = chosen if chosen else ("pair", None)
+                    planner = PLANNER_NAME if _pairs_only(lst) else MIXED_PLANNER_NAME
                 else:
-                    pair, planner = self._plan(lst, active, seed), _method(lst)
-                if pair is None:
+                    shown, planner = self._plan(lst, active, seed), _method(lst)
+                if shown is None:
                     why = plan["reason"] if plan else "the ranking is final"
                     raise NothingToAsk(f"nothing left to ask for '{slug}' ({mode}): {why}")
                 query = store.insert_query(
-                    self.conn, lst.id, judge, seq, "pair", list(pair), seed, planner, ENGINE_VERSION
+                    self.conn, lst.id, judge, seq, kind, list(shown), seed, planner, ENGINE_VERSION
                 )
                 if plan is not None:
                     self._save_plan(query.id, mode, plan)
@@ -286,7 +308,12 @@ class Rankify:
         round_seq: int | None = None,
         ms: int | None = None,
     ) -> RoundView:
-        """Answer the open round. ``numbers`` are as shown, best first.
+        """Answer the open round with the numbers as shown: the better item of a pair, the
+        best item of a pick, or every item best first for a ranking (the last one may be
+        left out, and "3142" works for 3 1 4 2).
+
+        "Can't decide" on a pair is a tie. On a pick or a ranking it records that the judge
+        couldn't answer, teaches the model nothing, and keeps that set from being asked again.
 
         ``ms`` is the answer time measured by an interactive front end. Without it, the time
         runs from when the question was issued, which includes any typing."""
@@ -303,7 +330,8 @@ class Rankify:
                     raise RankifyError("give either numbers or --cant-decide, not both")
                 outcome, answer = "cant_decide", None
             else:
-                outcome, answer = "answered", _order_from_numbers(numbers or [], query.shown)
+                outcome = "answered"
+                answer = _answer_from_numbers(query.kind, numbers or [], query.shown)
             if ms is None:
                 ms = int(
                     (
@@ -414,7 +442,12 @@ class Rankify:
         names = {it.id: it.name for it in store.items(self.conn, lst.id)}
 
         def named(c: dict) -> dict:
-            return c | {"first_name": names[c["first"]], "second_name": names[c["second"]]}
+            if "items" not in c:  # saved by a pairs-only engine (0.2)
+                c = c | {"kind": "pair", "items": [c["first"], c["second"]]}
+            c = c | {"names": [names[i] for i in c["items"]]}
+            if c["kind"] == "pair":
+                c |= {"first_name": names[c["first"]], "second_name": names[c["second"]]}
+            return c
 
         return WhyView(
             list=lst.slug,
@@ -525,12 +558,13 @@ class Rankify:
             items=[ShownItem(k + 1, iid, names[iid]) for k, iid in enumerate(query.shown)],
         )
 
-    def _history(self, lst: store.ListRow, pos: dict[int, int]) -> History:
-        """Effective pair answers in log order, as item positions."""
+    def _history(self, lst: store.ListRow, pos: dict[int, int], rounds=None) -> History:
+        """Effective pair answers in log order, as item positions. ``rounds`` saves reading
+        the log again when the caller already has it."""
         out = []
-        for r in store.effective_rounds(self.conn, lst.id):
+        for r in store.effective_rounds(self.conn, lst.id) if rounds is None else rounds:
             if r.kind != "pair":
-                continue  # pick and rank rounds arrive in Phase 3
+                continue  # see _set_rounds
             first, second = r.shown
             if r.outcome == "cant_decide":
                 y = TIE
@@ -538,6 +572,15 @@ class Rankify:
                 y = A_WINS if r.answer[0] == first else B_WINS
             out.append((pos[first], pos[second], y))
         return out
+
+    @staticmethod
+    def _set_rounds(rounds, pos: dict[int, int]) -> list[tuple[list, list]]:
+        """Answered pick and rank rounds in log order: (shown, answer), as item positions."""
+        return [
+            ([pos[i] for i in r.shown], [pos[i] for i in r.answer])
+            for r in rounds
+            if r.kind != "pair" and r.outcome == "answered"
+        ]
 
     def _calibration_repeat(
         self, lst: store.ListRow, active: list[int], seed: int
@@ -587,7 +630,14 @@ class Rankify:
         items = store.items(self.conn, lst.id)
         ids = [it.id for it in items]
         pos = {iid: k for k, iid in enumerate(ids)}
-        history = self._history(lst, pos)
+        rounds = store.effective_rounds(self.conn, lst.id)
+        history = self._history(lst, pos, rounds)
+        set_rounds = self._set_rounds(rounds, pos)
+        unanswered_sets = [
+            frozenset(pos[i] for i in r.shown)
+            for r in rounds
+            if r.kind != "pair" and r.outcome == "cant_decide"
+        ]
         active = [k for k, it in enumerate(items) if it.removed_at is None]
         upto = store.last_round_id(self.conn, lst.id)
         x, iterations, params = None, 0, {}
@@ -595,13 +645,16 @@ class Rankify:
 
         if method in _FITTED:
             pairs = Pairs.of(*zip(*history, strict=True)) if history else Pairs.of([], [], [])
+            choices = Choices.of(set_rounds)
             prior = Prior(**lst.settings["prior"])
             x0 = self._warm_start(lst, ids, prior) if warm else None
             if lst.settings.get("learn_sigma", method in _LEARNS_SIGMA):
                 sigma0 = self._last_sigma(lst) if warm else None
-                fit = fit_pairs_learning_sigma(len(ids), pairs, prior, x0=x0, sigma0=sigma0)
+                fit = fit_pairs_learning_sigma(
+                    len(ids), pairs, prior, x0=x0, sigma0=sigma0, choices=choices
+                )
             else:
-                fit = fit_pairs(len(ids), pairs, prior, x0=x0)
+                fit = fit_pairs(len(ids), pairs, prior, x0=x0, choices=choices)
             theta, cov = fit.theta, fit.theta_cov
             x, iterations = fit.x, fit.iterations
             params = {
@@ -651,36 +704,53 @@ class Rankify:
             x,
             ids,
             upto,
-            len(history),
+            len(history) + len(set_rounds),
             (perf_counter() - t0) * 1000,
             theta=theta,
             theta_cov=cov,
             ranks=ranks,
+            history=history,
+            set_rounds=set_rounds,
+            unanswered_sets=unanswered_sets,
         )
 
     def _smart_plan(
         self, lst: store.ListRow, judge: int, mode: str, seed: int
-    ) -> tuple[dict, tuple[int, int] | None]:
-        """rankify's planner: the pair worth the most per second, or None to stop."""
-        r = self._compute(lst, warm=True)
-        timing = Timing.fit(store.timing_samples(self.conn, lst.id, judge))
+    ) -> tuple[dict, tuple[str, list[int]] | None]:
+        """rankify's planner: the round worth the most per second as (kind, item ids in
+        display order), or None to stop."""
+        r = self._current(lst)
+        timing = Timing.fit(
+            store.timing_samples(self.conn, lst.id, judge),
+            store.set_timing_samples(self.conn, lst.id, judge),
+        )
         ids = r.item_ids
         looks: Counter = Counter()
-        for a, b, _ in self._history(lst, {iid: k for k, iid in enumerate(ids)}):
+        for a, b, _ in r.history:
             looks[a] += 1
             looks[b] += 1
-        plan = plan_pair(mode, r.theta, r.theta_cov, r.ranks, timing, seed, looks)
+        for shown, _ in r.set_rounds:
+            looks.update(shown)
+        avoid = frozenset(r.unanswered_sets)
+        kinds = PAIRS_ONLY if _pairs_only(lst) else ALL_KINDS
+        plan = plan_round(mode, r.theta, r.theta_cov, r.ranks, timing, seed, looks, kinds, avoid)
 
         def describe(c) -> dict:
-            return {
-                "first": ids[c.first],
-                "second": ids[c.second],
+            out = {
+                "kind": c.kind,
+                "items": [ids[p] for p in c.items],
                 "gain": c.gain,
                 "seconds": c.seconds,
                 "value": c.value,
-                "confidence": c.confidence,
-                "closeness": c.closeness,
             }
+            if c.kind == "pair":
+                out |= {
+                    "first": ids[c.first],
+                    "second": ids[c.second],
+                    "confidence": c.confidence,
+                    "closeness": c.closeness,
+                }
+            return out
 
         record = {
             "reason": plan.reason,
@@ -688,11 +758,22 @@ class Rankify:
             "chosen": None if plan.chosen is None else describe(plan.chosen),
             "closeness": None if plan.chosen is None else plan.chosen.closeness,
             "candidates": [describe(c) for c in plan.candidates],
-            "timing": {"base": timing.base, "close": timing.close, "samples": timing.samples},
+            "timing": {
+                "base": timing.base,
+                "close": timing.close,
+                "samples": timing.samples,
+                "typical": timing.typical,
+                "sets": {
+                    f"{kind} {size}": timing.set_seconds(kind, size)
+                    for kind in ("pick", "rank")
+                    for size in range(3, 6)
+                },
+                "set_samples": {f"{k} {s}": count for k, s, _, count in timing.sets},
+            },
         }
         if plan.chosen is None:
             return record, None
-        return record, (ids[plan.chosen.first], ids[plan.chosen.second])
+        return record, (plan.chosen.kind, [ids[p] for p in plan.chosen.items])
 
     def _save_plan(self, query_id: int, mode: str, record: dict) -> None:
         store.insert_plan(
@@ -711,8 +792,25 @@ class Rankify:
         fit = store.latest_fit(self.conn, lst.id)
         return None if fit is None else fit.params.get("sigma")
 
+    def _state_key(self, lst: store.ListRow) -> tuple:
+        """Everything a fit depends on that can change: the answer log and the items."""
+        items = tuple((it.id, it.removed_at is None) for it in store.items(self.conn, lst.id))
+        return store.last_round_id(self.conn, lst.id), items
+
+    def _current(self, lst: store.ListRow) -> Refit:
+        """The fit of the list as it is now. Reuses the last refit when nothing has changed
+        since, so asking the next round right after an answer doesn't fit twice."""
+        key = self._state_key(lst)
+        cached = self._fits.get(lst.id)
+        if cached is not None and cached[0] == key:
+            return cached[1]
+        r = self._compute(lst, warm=True)
+        self._fits[lst.id] = (key, r)
+        return r
+
     def _refit(self, lst: store.ListRow) -> Refit:
         r = self._compute(lst, warm=True)
+        self._fits[lst.id] = (self._state_key(lst), r)
         store.insert_fit(
             self.conn,
             lst.id,
@@ -748,6 +846,10 @@ def _method(lst: store.ListRow) -> str:
     return lst.settings.get("method", "rankify")
 
 
+def _pairs_only(lst: store.ListRow) -> bool:
+    return lst.settings.get("rounds", "pairs") == "pairs"
+
+
 def _close(a: float | None, b: float | None, tol: float) -> bool:
     if a is None or b is None:
         return a is None and b is None
@@ -767,11 +869,24 @@ def _clean_names(names) -> list[str]:
     return out
 
 
+def _answer_from_numbers(kind: str, numbers: list[int], shown: list[int]) -> list[int]:
+    """Item ids from the numbers the judge typed: the best one for a pick, else best first."""
+    k = len(shown)
+    if kind == "rank" and len(numbers) == 1 and numbers[0] > k:
+        numbers = [int(c) for c in str(numbers[0])]  # "3142" for 3 1 4 2
+    if kind == "pick":
+        if len(numbers) != 1 or not 1 <= numbers[0] <= k:
+            raise RankifyError(f"give the number of the best item, 1 to {k}, or --cant-decide")
+        return [shown[numbers[0] - 1]]
+    return _order_from_numbers(numbers, shown)
+
+
 def _order_from_numbers(numbers: list[int], shown: list[int]) -> list[int]:
     """Item ids best first, from the numbers the judge typed."""
     k = len(shown)
     if not numbers:
-        raise RankifyError("give the number of the better item, or --cant-decide")
+        what = "the better item" if k == 2 else "the items in order, best first"
+        raise RankifyError(f"give the number of {what}, or --cant-decide")
     if any(not 1 <= x <= k for x in numbers) or len(set(numbers)) != len(numbers):
         raise RankifyError(f"use each number from 1 to {k} at most once")
     if len(numbers) == k - 1:  # the last one is implied

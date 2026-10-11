@@ -25,18 +25,21 @@ import sys
 import tempfile
 import time
 from concurrent.futures import ProcessPoolExecutor
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from statistics import NormalDist
 
 import numpy as np
 
-from rankify.engine.judge import HumanParams, human_answer
+from rankify.engine.judge import HumanParams, human_answer, human_set_answer
 
 RATING_SYSTEMS = ("elo", "elo-close", "glicko2", "trueskill", "openskill", "arena")
 REFERENCE = ("just-sort-it", "insertion-sort")
-DEFAULT_METHODS = ("rankify", *RATING_SYSTEMS, *REFERENCE)
+# rankify runs once per mode: as shipped (pairs), and with `new --rounds mixed` (goal G3).
+MODED = ("rankify", "rankify-mixed")
+REPLAYED_RANKIFY = tuple(f"{m}:exact" for m in MODED)
+DEFAULT_METHODS = ("rankify", "rankify-mixed", *RATING_SYSTEMS, *REFERENCE)
 JUDGES = ("human", "perfect", "noisy")
 DEFAULT_JUDGES = ("human", "perfect")
 TARGETS = ("quick", "stable", "exact")
@@ -82,6 +85,20 @@ class Judge:
         # noisy: Bradley-Terry, the model rankify itself assumes
         p_first = 1.0 / (1.0 + math.exp(-1.702 * diff / (math.sqrt(2.0) * p.noise)))
         return (1 if rng.random() < p_first else 2), seconds
+
+    def answer_set(self, shown: list[str], kind: str, round_no: int) -> tuple[list[int], float]:
+        """(item numbers best first, one for a pick; seconds taken) for a pick or rank round.
+        The perfect and noisy judges take the human judge's time for the same round."""
+        p, rng = self.p, self.rng
+        scores = [self.theta[x] for x in shown]
+        if self.kind == "human":
+            return human_set_answer(p, rng, scores, kind, round_no)
+        _, seconds = human_set_answer(replace(p, lapse=0.0), rng, scores, kind, 0)
+        s = np.array(scores)
+        if self.kind == "noisy":  # Plackett-Luce with the Bradley-Terry scale of the pairs
+            s = 1.702 * s / (math.sqrt(2.0) * p.noise) + rng.gumbel(size=len(s))
+        numbers = [int(x) + 1 for x in np.argsort(-s, kind="stable")]
+        return (numbers if kind == "rank" else numbers[:1]), seconds
 
 
 def hidden_scores(
@@ -170,13 +187,16 @@ class RunResult:
     flags: dict[str, list[bool]] = field(default_factory=lambda: {t: [] for t in TARGETS})
     implied: list[bool] = field(default_factory=list)  # answer already implied by earlier ones
     repeats: list[bool] = field(default_factory=list)  # exact repeat of an earlier pair
-    correct: int = 0  # answers that matched the hidden scores
-    decided: int = 0  # answers that were not "can't decide"
+    correct: int = 0  # pairwise calls that matched the hidden scores
+    decided: int = 0  # pairwise calls made (a ranking of k makes k(k-1)/2, a pick k-1)
+    ties: int = 0  # "can't decide" answers
+    kinds: list[str] = field(default_factory=list)  # pair, pick or rank, per round
     calibration: list[tuple[float, bool]] = field(default_factory=list)
     coverage: list[bool] = field(default_factory=list)
     reorder_changed_top: bool | None = None
     reorder_tau: float | None = None
     ms: dict[str, list[float]] = field(default_factory=dict)
+    final_scores: list[float] = field(default_factory=list)  # hidden scores, final ranking order
     error: str | None = None  # set when the run crashed; left out of every statistic
 
     def reached(self, target: str) -> int | None:
@@ -199,6 +219,11 @@ def first_confirmed(flags: list[bool], finished: bool) -> int | None:
         if all(window):
             return r + 1
     return None
+
+
+def _pairs(items: list[int]):
+    """Every pair from ``items``, earlier item first."""
+    return itertools.combinations(items, 2)
 
 
 def kendall_tau(order: list[str], theta: dict[str, float]) -> float:
@@ -232,9 +257,12 @@ def run_one(
     method: str, judge_kind: str, n: int, seed: int, budget: int, profile: dict | None = None
 ) -> RunResult:
     """One hidden list, one method, through the CLI. ``method`` may name a mode, as in
-    ``rankify:quick``; rankify runs once per mode so each target is measured in its mode."""
+    ``rankify:quick``; rankify runs once per mode so each target is measured in its mode.
+    ``rankify-mixed`` is rankify with pick and rank rounds as well as pairs."""
     params, spread = _unpack(profile)
     base_method, _, mode = method.partition(":")
+    rounds_kind = "mixed" if base_method == "rankify-mixed" else "pairs"
+    base_method = "rankify" if base_method == "rankify-mixed" else base_method
     rng = np.random.default_rng(seed)
     names = [f"item-{k:02d}" for k in range(n)]
     theta = hidden_scores(names, rng, spread)
@@ -244,7 +272,18 @@ def run_one(
     res = RunResult(method, judge_kind, n, seed)
     known = np.zeros((n, n), dtype=bool)  # known[w, l]: earlier answers imply w beats l
     seen: set[frozenset] = set()
-    log: list[tuple[int, int, int]] = []  # (first, second, outcome) for the reorder check
+    log: list[tuple] = []  # (first, second, outcome) or ("set", shown, answer), for replays
+
+    def learn(winner: int, loser: int) -> None:
+        """Record that ``winner`` beat ``loser``, with everything that now follows."""
+        nonlocal known
+        res.decided += 1
+        res.correct += theta[names[winner]] > theta[names[loser]]
+        rows = known[:, winner].copy()
+        rows[winner] = True
+        cols = known[loser, :].copy()
+        cols[loser] = True
+        known |= np.outer(rows, cols)
 
     with tempfile.TemporaryDirectory() as tmp:
         db, items = Path(tmp) / "bench.db", Path(tmp) / "items.txt"
@@ -262,9 +301,12 @@ def run_one(
             mode or "stable",
             "--seed",
             str(seed),
+            "--rounds",
+            rounds_kind,
         )
         ranking = None
-        for round_no in range(budget):
+        effort = 0  # fatigue grows per call made: a ranking of k counts as k - 1 pairs
+        for _ in range(budget):
             code, out = cli.call("next", "bench", "--json")
             if code == 3:
                 res.finished = True
@@ -273,27 +315,43 @@ def run_one(
                 raise RuntimeError(f"next exited with {code}")
             round_ = json.loads(out)
             shown = [i["name"] for i in round_["items"]]
-            pick, seconds = judge.answer(shown, round_no)
-            res.seconds.append(seconds)
-            a, b = index[shown[0]], index[shown[1]]
-            res.repeats.append(frozenset((a, b)) in seen)
-            seen.add(frozenset((a, b)))
-            res.implied.append(bool(known[a, b] or known[b, a]))
-            timed = ("--round", str(round_["round"]), "--ms", str(int(seconds * 1000)))
-            if pick is None:
-                cli.ok("answer", "bench", "--cant-decide", *timed)
-                log.append((a, b, 2))
+            kind = round_["kind"]
+            idx = [index[x] for x in shown]
+            res.kinds.append(kind)
+            res.repeats.append(frozenset(idx) in seen)
+            seen.add(frozenset(idx))
+            if kind == "pair":
+                a, b = idx
+                res.implied.append(bool(known[a, b] or known[b, a]))
+                pick, seconds = judge.answer(shown, effort)
+                timed = ("--round", str(round_["round"]), "--ms", str(int(seconds * 1000)))
+                if pick is None:
+                    cli.ok("answer", "bench", "--cant-decide", *timed)
+                    log.append((a, b, 2))
+                    res.ties += 1
+                else:
+                    cli.ok("answer", "bench", str(pick), *timed)
+                    log.append((a, b, 0 if pick == 1 else 1))
+                    learn(*((a, b) if pick == 1 else (b, a)))
             else:
-                cli.ok("answer", "bench", str(pick), *timed)
-                winner, loser = (a, b) if pick == 1 else (b, a)
-                log.append((a, b, 0 if pick == 1 else 1))
-                res.decided += 1
-                res.correct += theta[names[winner]] > theta[names[loser]]
-                rows = known[:, winner].copy()
-                rows[winner] = True
-                cols = known[loser, :].copy()
-                cols[loser] = True
-                known |= np.outer(rows, cols)
+                if kind == "pick":  # implied when earlier answers already name the best
+                    res.implied.append(any(known[x, [y for y in idx if y != x]].all() for x in idx))
+                else:
+                    res.implied.append(all(known[x, y] or known[y, x] for x, y in _pairs(idx)))
+                numbers, seconds = judge.answer_set(shown, kind, effort)
+                timed = ("--round", str(round_["round"]), "--ms", str(int(seconds * 1000)))
+                cli.ok("answer", "bench", *map(str, numbers), *timed)
+                answer = [idx[k - 1] for k in numbers]
+                log.append(("set", idx, answer))
+                if kind == "pick":
+                    for x in idx:
+                        if x != answer[0]:
+                            learn(answer[0], x)
+                else:
+                    for x, y in _pairs(answer):
+                        learn(x, y)
+            effort += len(shown) - 1
+            res.seconds.append(seconds)
 
             ranking = json.loads(cli.ok("show", "bench", "--json"))
             order = [i["name"] for i in ranking["items"]]
@@ -305,6 +363,7 @@ def run_one(
 
     if ranking is not None:
         items_ = ranking["items"]
+        res.final_scores = [theta[i["name"]] for i in items_]
         for x, y in itertools.pairwise(items_):
             if x["confidence"] is not None:
                 res.calibration.append((x["confidence"], theta[x["name"]] > theta[y["name"]]))
@@ -318,16 +377,19 @@ def run_one(
 
 def _reorder_check(res: RunResult, log, n, rng) -> None:
     """Replay the same answers in two other orders through the method's scoring."""
-    if res.method not in ("rankify:exact", *ONLINE) or len(log) < 2:
+    if res.method not in (*REPLAYED_RANKIFY, *ONLINE) or len(log) < 2:
         return
     from rankify.engine import baselines
     from rankify.engine.fit import fit_pairs_learning_sigma
-    from rankify.engine.model import Pairs
+    from rankify.engine.model import Choices, Pairs
 
     def scores(order) -> np.ndarray:
-        hist = [log[k] for k in order]
-        if res.method == "rankify:exact":
-            return fit_pairs_learning_sigma(n, Pairs.of(*zip(*hist, strict=True))).theta
+        everything = [log[k] for k in order]
+        hist = [e for e in everything if e[0] != "set"]
+        if res.method in REPLAYED_RANKIFY:
+            pairs = Pairs.of(*zip(*hist, strict=True)) if hist else Pairs.of([], [], [])
+            sets = Choices.of([(e[1], e[2]) for e in everything if e[0] == "set"])
+            return fit_pairs_learning_sigma(n, pairs, choices=sets).theta
         if res.method == "elo":
             return baselines.elo_ratings(n, hist)
         return getattr(baselines, f"{res.method}_ratings")(n, hist)[0]
@@ -378,17 +440,24 @@ def run_bench(
     progress=None,
     profile: dict | None = None,
     cache: Path | None = None,
+    set_time_scale: float = 1.0,
 ) -> str:
     """Run the benchmark. ``profile`` (from ``load_profile``) replaces the guessed human judge.
+    ``set_time_scale`` multiplies how long the judges take on pick and rank rounds, to test
+    how much the result depends on that guess (goal G3).
 
     ``cache`` is a JSON-lines file of finished runs. Each run is appended as soon as it
     finishes, and runs already in the file are not run again, so an interrupted benchmark
     resumes where it stopped. Only reuse a cache with the same code.
     """
+    if set_time_scale != 1.0:
+        profile = dict(profile or {"spread": SCORE_SPREAD, "notes": []})
+        profile["params"] = {**profile.get("params", {}), "set_time_scale": set_time_scale}
+        profile.setdefault("label", "all guesses until a real session calibrates them")
     runnable = [
         variant
         for m in methods
-        for variant in ([f"rankify:{t}" for t in TARGETS] if m == "rankify" else [m])
+        for variant in ([f"{m}:{t}" for t in TARGETS] if m in MODED else [m])
     ]
     tasks = [
         (m, j, n, 1000 * n + s, budget_per_item * n, profile)
@@ -421,7 +490,9 @@ def run_bench(
         with ProcessPoolExecutor(max_workers=workers, initializer=_lower_priority) as pool:
             for res in pool.map(_run_task, todo, chunksize=1):
                 finished(res)
-    elapsed = time.perf_counter() - t0
+    elapsed = f"wall time {time.perf_counter() - t0:.0f} s"
+    if len(todo) < len(tasks):
+        elapsed += f" for {len(todo)} runs; the other {len(tasks) - len(todo)} came from the cache"
     failed = [r for r in results if r.error]
     results = [r for r in results if not r.error]
     real = _real_cli_sample() if real_cli else None
@@ -461,16 +532,18 @@ def _real_cli_sample(calls: int = 5) -> dict[str, float] | None:
             check=True,
             capture_output=True,
         )
-        steps = (
-            ("next", ["next", "real", "--json"]),
-            ("answer", ["answer", "real", "1"]),
-            ("show", ["show", "real", "--json"]),
-        )
+
+        def timed(name: str, *args: str) -> str:
+            t0 = time.perf_counter()
+            done = subprocess.run([*base, *args], check=True, capture_output=True, text=True)
+            out[name].append((time.perf_counter() - t0) * 1000)
+            return done.stdout
+
         for _ in range(calls):
-            for name, args in steps:
-                t0 = time.perf_counter()
-                subprocess.run([*base, *args], check=True, capture_output=True)
-                out[name].append((time.perf_counter() - t0) * 1000)
+            round_ = json.loads(timed("next", "next", "real", "--json"))
+            k = len(round_["items"]) if round_["kind"] == "rank" else 1
+            timed("answer", "answer", "real", *(str(x) for x in range(1, k + 1)))
+            timed("show", "show", "real", "--json")
     return {k: statistics.median(v) for k, v in out.items()}
 
 
@@ -508,7 +581,10 @@ FEATURES = {
     },
     "Rounds left": {"rankify": "no (Phase 4)"},
     "Precision modes": {"rankify": "yes: quick, stable, exact"},
-    "Pick / rank rounds": {"rankify": "no (Phase 3)"},
+    "Pick / rank rounds": {
+        "rankify-mixed": "yes: picks and rankings of 3 to 5, when they teach more per second",
+        "rankify": "no; `new --rounds mixed` adds them",
+    },
     "Confidence and Could be": {
         "rankify": "yes",
         "glicko2": "yes (from RD)",
@@ -536,12 +612,12 @@ def _report(
     for r in results:
         by.setdefault((r.n, r.judge, r.method), []).append(r)
     for (n, j, m), rs in list(by.items()):
-        if m == "rankify:exact":  # the longest rankify run stands for rankify in most tables
-            by[(n, j, "rankify")] = rs
+        if m in REPLAYED_RANKIFY:  # the longest rankify run stands for it in most tables
+            by[(n, j, m.partition(":")[0])] = rs
 
     def runs_for(n: int, j: str, m: str, target: str) -> list[RunResult]:
         """rankify's result for a target comes from its run in that target's mode."""
-        return by[(n, j, f"rankify:{target}")] if m == "rankify" else by[(n, j, m)]
+        return by[(n, j, f"{m}:{target}")] if m in MODED else by[(n, j, m)]
 
     p, spread = _unpack(profile)
     source = profile["label"] if profile else "all guesses until a real session calibrates them"
@@ -553,7 +629,7 @@ def _report(
         (
             f"- Setup: {', '.join(map(str, sizes))} items; judges: {', '.join(judges)}; {runs} "
             "hidden lists per setting, the same for every method; budget "
-            f"{budget_per_item} rounds per item; wall time {elapsed:.0f} s."
+            f"{budget_per_item} rounds per item; {elapsed}."
         ),
         (
             "- Every method ran through the CLI: `new --method`, then `next`, `answer` (or "
@@ -574,7 +650,8 @@ def _report(
         ),
         "",
         (
-            "**Methods.** rankify; rating systems built for human judges (Elo, Elo with close "
+            "**Methods.** rankify as shipped (pairs); rankify-mixed (the same with `new --rounds "
+            "mixed`, which also asks picks and rankings of 3 to 5 items); rating systems built for human judges (Elo, Elo with close "
             "pairs, Glicko-2, TrueSkill, openskill, and Chatbot-Arena-style Bradley-Terry); and two "
             "sorts as reference lines only. The sorts assume a consistent judge, which people are "
             "not."
@@ -590,15 +667,20 @@ def _report(
             "sanity check. **noisy**: Bradley-Terry noise only, the model rankify assumes."
         ),
         "",
-        "| Judge | Answers right | Can't decide | Seconds per answer |",
+        (
+            "A pick or rank round is answered from the same perceived scores, without \"can't "
+            'decide". Its time is a guess: a ranking costs one call per neighbour in the '
+            "judge's order, a pick one call between the best two plus half an easy call per "
+            "other item."
+        ),
+        "",
+        "| Judge | Pairwise calls right | Can't decide (pairs) | Seconds per round |",
         "|---|---|---|---|",
     ]
     for j in judges:
         rs = [r for r in results if r.judge == j]
-        decided = sum(r.decided for r in rs)
-        total = sum(r.rounds for r in rs)
-        right = sum(r.correct for r in rs) / max(1, decided)
-        ties = 1 - decided / max(1, total)
+        right = sum(r.correct for r in rs) / max(1, sum(r.decided for r in rs))
+        ties = sum(r.ties for r in rs) / max(1, sum(r.kinds.count("pair") for r in rs))
         secs = statistics.mean(s for r in rs for s in r.seconds)
         lines.append(f"| {j} | {right:.0%} | {ties:.0%} | {secs:.1f} |")
     difficulty = [(n, *list_difficulty(n, p, spread)) for n in sizes]
@@ -616,7 +698,13 @@ def _report(
             f"Human judge settings: noise {p.noise}, fatigue +{p.fatigue:.1%} per round (up to "
             f"×{p.fatigue_cap}), first-item lean {p.first_bonus:.2f}, lapses {p.lapse:.0%}, "
             f"can't-decide up to {p.tie_peak:.0%}, {p.base_seconds:.1f} s per easy answer plus "
-            f"up to {p.close_seconds:.1f} s on close calls. Source: {source}."
+            f"up to {p.close_seconds:.1f} s on close calls"
+            + (
+                f", pick and rank rounds ×{p.set_time_scale:g} the guessed time"
+                if p.set_time_scale != 1.0
+                else ""
+            )
+            + f". Source: {source}."
         ),
         "",
     ]
@@ -624,7 +712,7 @@ def _report(
         lines += ["Calibration notes:", ""] + [f"- {note}" for note in profile["notes"]] + [""]
 
     def method_label(m: str) -> str:
-        return f"{m} (reference)" if m in REFERENCE else f"**{m}**" if m == "rankify" else m
+        return f"{m} (reference)" if m in REFERENCE else f"**{m}**" if m in MODED else m
 
     for j in judges:
         for n in sizes:
@@ -653,8 +741,11 @@ def _report(
                     else:
                         cells.append(f"{rounds:.0f} · {mins:.1f} min ({got}/{len(rs)})")
                 lines.append(f"| {method_label(m)} | " + " | ".join(cells) + " |")
-            if "rankify" in methods:
-                lines += _rankify_stops(by, n, j) + _ratios(runs_for, methods, n, j)
+            for m in MODED:
+                if m in methods:
+                    lines += _rankify_stops(by, n, j, m)
+            if any(m in methods for m in MODED):
+                lines += _ratios(runs_for, methods, n, j) + _round_mix(by, methods, n, j)
             checkpoints = [c for c in (10, 25, 50, 100, 200, 400) if c <= budget_per_item * n]
             lines += [
                 "",
@@ -724,7 +815,7 @@ def _report(
         "Each list's answers replayed in two shuffled orders through the method's scoring:",
         "",
     ]
-    for m in ("rankify:exact", *ONLINE):
+    for m in (*REPLAYED_RANKIFY, *ONLINE):
         rs = [r for r in results if r.method == m and r.reorder_changed_top is not None]
         label = m.partition(":")[0]
         if rs:
@@ -774,6 +865,8 @@ def _report(
         for m in methods:
             if feature.startswith("Same answers") and m in (*ONLINE, "elo-close"):
                 cells.append("no: updates one match at a time")
+            elif m == "rankify-mixed" and m not in per:  # the same as rankify otherwise
+                cells.append(per.get("rankify", default))
             else:
                 cells.append(per.get(m, default))
         lines.append(f"| {feature} | " + " | ".join(cells) + " |")
@@ -794,52 +887,113 @@ def _report(
             "TrueSkill and openskill defaults). None was tuned."
         ),
         "- Human time counts answering only.",
+        (
+            "- How long a person takes to pick from or rank 3 to 5 items is a guess in both "
+            "the judge and the planner. The planner switches to the judge's own times after "
+            "8 answers of a kind and size."
+        ),
         "",
     ]
     return "\n".join(lines)
 
 
-def _rankify_stops(by, n: int, j: str) -> list[str]:
+def _rankify_stops(by, n: int, j: str, method: str = "rankify") -> list[str]:
     """When rankify said it was done, in each mode: how often, how soon, and was it right?"""
     lines = [
         "",
-        "When rankify stopped by itself, in each mode (median over lists that stopped):",
+        f"When {method} stopped by itself, in each mode (median over lists that stopped):",
         "",
-        "| Mode | Stopped by itself | Target really met at the stop | Rounds | Minutes |",
-        "|---|---|---|---|---|",
+        (
+            "| Mode | Stopped by itself | Target really met at the stop | G8 at the stop | Rounds "
+            "| Minutes |"
+        ),
+        "|---|---|---|---|---|---|",
     ]
     for t in TARGETS:
-        rs = by[(n, j, f"rankify:{t}")]
+        rs = by[(n, j, f"{method}:{t}")]
         stopped = [r for r in rs if r.finished and r.rounds]
         met = sum(r.flags[t][-1] for r in stopped)
         rounds = statistics.median(r.rounds for r in stopped) if stopped else None
         mins = statistics.median(sum(r.seconds) / 60 for r in stopped) if stopped else None
         lines.append(
-            f"| {t} | {len(stopped)}/{len(rs)} | {met}/{len(stopped)} | "
+            f"| {t} | {len(stopped)}/{len(rs)} | {met}/{len(stopped)} | {_g8(t, stopped)} | "
             + ("—" if rounds is None else f"{rounds:.0f}")
             + " | "
             + ("—" if mins is None else f"{mins:.1f}")
             + " |"
         )
+    lines += [
+        "",
+        (
+            "G8 asks less than the targets above: Quick, the true #1 on top in at least 90% of "
+            "lists; Stable, at least 90% of neighbour pairs in the top quarter in the right order; "
+            "Exact, at least 95% of all neighbour pairs. Swaps of near-ties don't count."
+        ),
+    ]
     return lines
 
 
+def _g8(target: str, runs: list[RunResult]) -> str:
+    """Goal G8's measure at the stop, over the lists that stopped."""
+    runs = [r for r in runs if r.final_scores]
+    if not runs:
+        return "—"
+    if target == "quick":
+        right = sum(r.final_scores[0] >= max(r.final_scores) - TIE_MARGIN for r in runs)
+        return f"#1 right in {right}/{len(runs)}"
+    right = total = 0
+    for r in runs:
+        s = r.final_scores
+        k = max(3, math.ceil(len(s) / 4)) if target == "stable" else len(s)
+        for x, y in itertools.pairwise(s[:k]):
+            if abs(x - y) >= TIE_MARGIN:
+                total += 1
+                right += x > y
+    return f"{right / max(1, total):.0%} of pairs right"
+
+
 def _ratios(runs_for, methods, n: int, j: str) -> list[str]:
-    """rankify's time to each target as a share of a baseline's (goals G1 and G2)."""
+    """One method's time to each target as a share of another's (goals G1, G2 and G3)."""
     lines = []
-    for other, goal in (("elo", "G1: at most 50%"), ("just-sort-it", "G2: at most 80%")):
-        if other not in methods:
+    for mine_m, other, goal in (
+        ("rankify", "elo", "G1: at most 50%"),
+        ("rankify", "just-sort-it", "G2: at most 80%"),
+        ("rankify-mixed", "rankify", "G3: under 100%"),
+    ):
+        if mine_m not in methods or other not in methods:
             continue
         parts = []
         for t in ("quick", "stable", "exact"):
-            mine = _median_or_none([r.minutes_to(t) for r in runs_for(n, j, "rankify", t)])
+            mine = _median_or_none([r.minutes_to(t) for r in runs_for(n, j, mine_m, t)])
             theirs = _median_or_none([r.minutes_to(t) for r in runs_for(n, j, other, t)])
             if mine is None or theirs is None:
                 parts.append(f"{t} n/a")
             else:
                 parts.append(f"{t} {mine / theirs:.0%}")
-        lines.append(f"- rankify's time as a share of {other}'s ({goal}): " + ", ".join(parts))
+        lines.append(f"- {mine_m}'s time as a share of {other}'s ({goal}): " + ", ".join(parts))
     return ["", *lines] if lines else []
+
+
+def _round_mix(by, methods, n: int, j: str) -> list[str]:
+    """How rankify split its rounds between pairs, picks and rankings, per mode."""
+    lines = [
+        "",
+        "Round mix, per mode (share of rounds; median seconds per round of that kind):",
+        "",
+        "| Method | Mode | Pairs | Picks | Rankings |",
+        "|---|---|---|---|---|",
+    ]
+    for m in (x for x in MODED if x in methods):
+        for t in TARGETS:
+            rs = by[(n, j, f"{m}:{t}")]
+            total = max(1, sum(len(r.kinds) for r in rs))
+            cells = []
+            for kind in ("pair", "pick", "rank"):
+                secs = [s for r in rs for k, s in zip(r.kinds, r.seconds, strict=True) if k == kind]
+                share = len(secs) / total
+                cells.append(f"{share:.0%} · {statistics.median(secs):.1f} s" if secs else "0%")
+            lines.append(f"| {m} | {t} | " + " | ".join(cells) + " |")
+    return lines
 
 
 def _ece(pairs: list[tuple[float, bool]]) -> float:

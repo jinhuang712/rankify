@@ -76,12 +76,28 @@ def new(
             "how you answer.",
         ),
     ] = False,
+    rounds: Annotated[
+        str,
+        typer.Option(
+            "--rounds",
+            help="pairs: pairs only (the default). mixed: also 'pick the best' and 'put in "
+            "order' rounds of 3 to 5 items, whichever teaches the most per second; it did not "
+            "save time in the benchmark yet.",
+        ),
+    ] = "pairs",
 ) -> None:
     """Make a new list."""
     names = items.read_text(encoding="utf-8").splitlines() if items else []
     try:
         _service(ctx).create_list(
-            slug, title, names, mode=mode, method=method, seed=seed, calibrate=calibrate
+            slug,
+            title,
+            names,
+            mode=mode,
+            method=method,
+            seed=seed,
+            calibrate=calibrate,
+            rounds=rounds,
         )
     except RankifyError as e:
         _fail(str(e))
@@ -142,8 +158,12 @@ def _print_round(view: RoundView) -> None:
     typer.echo(f"Round {view.round} · {view.prompt}\n")
     for item in view.items:
         typer.echo(f"  {item.n}  {item.name}")
-    numbers = " or ".join(str(i.n) for i in view.items)
-    typer.echo(f"\nAnswer with: rankify answer {view.list} <{numbers}>   (or --cant-decide)")
+    if view.kind == "rank":
+        example = " ".join(str(i.n) for i in reversed(view.items))
+        how = f"<all numbers, best first, like {example}>"
+    else:
+        how = "<" + " or ".join(str(i.n) for i in view.items) + ">"
+    typer.echo(f"\nAnswer with: rankify answer {view.list} {how}   (or --cant-decide)")
 
 
 def _round_json(view: RoundView) -> dict:
@@ -189,7 +209,11 @@ def answer(
     ctx: typer.Context,
     slug: Slug,
     numbers: Annotated[
-        list[int] | None, typer.Argument(help="Item numbers as shown, best first.")
+        list[int] | None,
+        typer.Argument(
+            help="Item numbers as shown: the better or best one, or for 'put in order' all of "
+            "them best first (the last may be left out; 3142 works too)."
+        ),
     ] = None,
     cant_decide: Annotated[
         bool, typer.Option("--cant-decide", help="The items are too close to call.")
@@ -328,14 +352,19 @@ def why(
     typer.echo(f"Expected answer time: {pace} (from {t['samples']} of your timed answers)\n")
     if view.chosen is None:
         typer.echo(f"Stopped: {view.reason}.")
-    typer.echo(f"  {'Pair':<44} {'Learns':>8} {'Time':>6}  {'P(first better)':>15}")
+    typer.echo(f"  {'Round':<52} {'Learns':>8} {'Time':>6}")
     for k, c in enumerate(view.candidates):
         mark = "→" if k == 0 and view.chosen is not None else " "
-        pair = f"{c['first_name']} vs {c['second_name']}"
-        typer.echo(
-            f"{mark} {pair:<44} {c['gain']:>6.3f} b {c['seconds']:>5.1f}s  {c['confidence']:>15.0%}"
-        )
-    typer.echo("\nLearns: expected bits about the order of the pair that matter for the mode.")
+        kind = {"pair": "", "pick": "pick: ", "rank": "order: "}[c["kind"]]
+        joiner = " vs " if c["kind"] == "pair" else ", "
+        text = kind + joiner.join(c["names"])
+        if len(text) > 52:
+            text = text[:51] + "…"
+        typer.echo(f"{mark} {text:<52} {c['gain']:>6.3f} b {c['seconds']:>5.1f}s")
+    typer.echo(
+        "\nLearns: expected bits about the order of the shown items, counting only the pairs "
+        "that matter for the mode."
+    )
 
 
 @app.command()
@@ -346,7 +375,7 @@ def bench(
     ] = "human,perfect",
     methods: Annotated[
         str, typer.Option("--methods", help="Methods to compare, comma-separated.")
-    ] = "rankify,elo,elo-close,glicko2,trueskill,openskill,arena,just-sort-it,insertion-sort",
+    ] = "rankify,rankify-mixed,elo,elo-close,glicko2,trueskill,openskill,arena,just-sort-it,insertion-sort",
     runs: Annotated[int, typer.Option("--runs", help="Hidden lists per setting.")] = 20,
     budget: Annotated[
         int, typer.Option("--budget-per-item", help="Round budget per item in the list.")
@@ -357,6 +386,14 @@ def bench(
     report: Annotated[
         Path | None, typer.Option("--report", help="Also write the report to this file.")
     ] = None,
+    set_time_scale: Annotated[
+        float,
+        typer.Option(
+            "--set-time-scale",
+            help="Multiply the judges' time on pick and rank rounds, such as 0.5 or 2, to see "
+            "how much the result depends on that guess. Use a separate --cache per value.",
+        ),
+    ] = 1.0,
     judge_profile: Annotated[
         Path | None,
         typer.Option(
@@ -391,6 +428,7 @@ def bench(
         progress=progress,
         profile=profile,
         cache=cache,
+        set_time_scale=set_time_scale,
     )
     if report:
         report.parent.mkdir(parents=True, exist_ok=True)
@@ -401,7 +439,10 @@ def bench(
 # ---------------------------------------------------------------- interactive play
 
 
-PLAY_KEYS = "[1] or [2] pick   [t] can't decide   [u] undo   [q] quit"
+PLAY_KEYS = (
+    "[number] pick (to put in order, press the numbers best first)   [t] can't decide   "
+    "[u] undo   [q] quit"
+)
 
 
 @app.command()
@@ -437,10 +478,29 @@ def play(
         for item in view.items:
             typer.echo(f"  {item.n}  {item.name}")
         shown = time.perf_counter()
+        k = len(view.items)
+        need = k - 1 if view.kind in ("pair", "rank") else 1  # a ranking's last is implied
+        digits = [str(i) for i in range(1, k + 1)]
+        typed: list[str] = []
         while True:
             key = typer.getchar().lower()
-            if key in ("1", "2", "t", "u", "q"):
+            if not key:  # end of input
+                key, typed = "q", []
                 break
+            if key in ("t", "u", "q") and not typed:
+                break
+            if key in ("\x7f", "\b") and typed:  # backspace
+                typed.pop()
+                typer.echo("\b \b", nl=False)
+            elif key in digits and key not in typed:
+                typed.append(key)
+                if view.kind == "rank":
+                    typer.echo(key, nl=False)
+                if len(typed) == need:
+                    key = "".join(typed)
+                    break
+        if view.kind == "rank":
+            typer.echo("")
         ms = int((time.perf_counter() - shown) * 1000)
         if key == "q":
             break
@@ -456,8 +516,14 @@ def play(
             rk.answer(slug, cant_decide=True, round_seq=view.round, ms=ms)
             typer.echo("  can't decide\n")
         else:
-            rk.answer(slug, [int(key)], round_seq=view.round, ms=ms)
-            typer.echo(f"  {view.items[int(key) - 1].name}\n")
+            numbers = [int(c) for c in key]
+            rk.answer(slug, numbers, round_seq=view.round, ms=ms)
+            if view.kind == "rank":
+                rest = [i.n for i in view.items if i.n not in numbers]
+                names = [view.items[x - 1].name for x in numbers + rest]
+                typer.echo("  " + " > ".join(names) + "\n")
+            else:
+                typer.echo(f"  {view.items[numbers[0] - 1].name}\n")
         answered += 1
     typer.echo(
         f"{answered} answer{'s' if answered != 1 else ''} this session. "

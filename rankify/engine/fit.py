@@ -10,7 +10,15 @@ from dataclasses import dataclass, replace
 
 import numpy as np
 
-from rankify.engine.model import DEFAULT_PRIOR, Pairs, Prior, grad_hess, log_posterior
+from rankify.engine.model import (
+    DEFAULT_PRIOR,
+    NO_CHOICES,
+    Choices,
+    Pairs,
+    Prior,
+    grad_hess,
+    log_posterior,
+)
 
 
 @dataclass(frozen=True)
@@ -60,13 +68,16 @@ def fit_pairs(
     x0: np.ndarray | None = None,
     tol: float = 1e-10,
     max_iter: int = 100,
+    choices: Choices = NO_CHOICES,
 ) -> Fit:
-    """Fit item scores to pair answers.
+    """Fit item scores to pair answers, and to pick and rank rounds given as ``choices``.
 
     ``x0`` warm-starts the fit (for example from the previous fit). It changes how many
     steps the fit takes, not where it ends. ``ties=False`` gives plain Bradley–Terry, and
     ``bias=False`` fixes the first-slot bonus at zero.
     """
+    if len(choices) and choices.sets.max() >= n:
+        raise ValueError("choice refers to an item index outside 0..n-1")
     if len(pairs) and (pairs.a.max(initial=-1) >= n or pairs.b.max(initial=-1) >= n):
         raise ValueError("pair refers to an item index outside 0..n-1")
     if not ties and np.any(pairs.y == 2):
@@ -83,10 +94,10 @@ def fit_pairs(
         free[n + 1] = False  # the tie parameter has no effect without ties
         x[n + 1] = prior.tie_mean
 
-    f = log_posterior(x, n, pairs, prior, ties)
+    f = log_posterior(x, n, pairs, prior, ties, choices)
     neg_h = None
     for iteration in range(1, max_iter + 1):
-        g, h = grad_hess(x, n, pairs, prior, ties)
+        g, h = grad_hess(x, n, pairs, prior, ties, choices)
         neg_h = -h[np.ix_(free, free)]
         step = np.linalg.solve(neg_h, g[free])
         # Backtrack only if a full Newton step would go downhill (far from the optimum).
@@ -94,7 +105,7 @@ def fit_pairs(
         while True:
             x_new = x.copy()
             x_new[free] += t * step
-            f_new = log_posterior(x_new, n, pairs, prior, ties)
+            f_new = log_posterior(x_new, n, pairs, prior, ties, choices)
             if f_new >= f - 1e-12 * max(1.0, abs(f)) or t < 1e-8:
                 break
             t *= 0.5
@@ -139,19 +150,26 @@ def fit_pairs_learning_sigma(
     sigma0: float | None = None,
     tol: float = 1e-10,
     max_rounds: int = 200,
+    choices: Choices = NO_CHOICES,
 ) -> Fit:
     """Fit item scores and learn the prior width from the answers themselves.
 
     A consistent judge spreads items far apart, so the width grows and each answer counts
     for more. A judge who often contradicts themself keeps it narrow. The width maximizes the
     evidence (type-II maximum a posteriori; MacKay 1992), found by expectation-maximization
-    over the Laplace posterior (Dempster, Laird & Rubin 1977) with Aitken acceleration. The
+    over the Laplace posterior (Dempster, Laird & Rubin 1977), sped up by secant steps. The
     result depends only on the answers: ``x0`` and ``sigma0`` change the speed, not the end.
     """
 
     def update(log_sigma: float, x) -> tuple[float, Fit]:
         fit = fit_pairs(
-            n, pairs, replace(prior, sigma=math.exp(log_sigma)), ties=ties, bias=bias, x0=x
+            n,
+            pairs,
+            replace(prior, sigma=math.exp(log_sigma)),
+            ties=ties,
+            bias=bias,
+            x0=x,
+            choices=choices,
         )
         spread = float(np.sum(fit.theta**2) + np.trace(fit.theta_cov))
         return _best_log_sigma(spread, n, log_sigma, hyper), fit
@@ -178,7 +196,9 @@ def fit_pairs_learning_sigma(
         s_prev, g_prev, s = s, g, s + step
     else:
         raise FitError(f"prior width did not converge in {max_rounds} rounds")
-    final = fit_pairs(n, pairs, replace(prior, sigma=math.exp(s)), ties=ties, bias=bias, x0=x)
+    final = fit_pairs(
+        n, pairs, replace(prior, sigma=math.exp(s)), ties=ties, bias=bias, x0=x, choices=choices
+    )
     return replace(final, iterations=steps, sigma=math.exp(s))
 
 

@@ -2,8 +2,8 @@
 
 > **Partly built.** Working now:
 >
-> - `new` (with `--method` and `--calibrate`), `add`, `remove` and `lists`
-> - `next`: the rankify planner, with `--mode` to override the list's mode
+> - `new` (with `--method`, `--rounds` and `--calibrate`), `add`, `remove` and `lists`
+> - `next`: the rankify planner, with `--mode` to override the list's mode. It asks pairs, or with `new --rounds mixed` also picks and orderings of 3 to 5 items
 > - `answer`, `undo` and a minimal `play`
 > - `show`, which reports whether the mode's target is reached, and `why`
 > - `verify`, `bench` and `calibrate`
@@ -29,9 +29,11 @@ rankify remove travel "Paris"     # hidden from the ranking; its rounds still co
 rankify lists                     # all lists and their progress
 ```
 
+A list asks pairs ("which is better?") unless it is made with `--rounds mixed`. A mixed list also asks picks ("which is best?") and orderings ("put these in order, best first") of 3 to 5 items, whichever teaches the most per second of your time. In the Phase 3 benchmark mixed rounds were faster for some targets and slower for others, so they are not the default yet (see [ROADMAP.md](../../ROADMAP.md#phase-3-mixed-rounds)).
+
 ## Rank in the terminal UI
 
-**Built now: a minimal version.** `rankify play` shows one pair at a time and reads single keys: `1` or `2` to pick, `t` for can't decide, `u` to undo, `q` to quit. It times each answer from when the question appears to the keypress. It needs a real terminal, because it reads keys without Enter.
+**Built now: a minimal version.** `rankify play` shows one round at a time and reads single keys. For a pair or a pick, press the item's number. To put items in order, press their numbers best first. The last one fills itself in, and Backspace takes back a key. `t` is can't decide, `u` undoes the last answer, and `q` quits. It times each answer from when the question appears to the last keypress. It needs a real terminal, because it reads keys without Enter.
 
 ```sh
 rankify play travel               # until you press q
@@ -72,6 +74,8 @@ Progress is saved after every answer.
 ```sh
 rankify next travel               # show the next round
 rankify answer travel 2 1 3       # numbers as shown, best first
+rankify answer travel 213         # the same, typed as one number
+rankify answer travel 2 1         # the same: the last one is implied
 rankify answer travel --cant-decide
 rankify undo travel
 ```
@@ -82,6 +86,8 @@ rankify undo travel
 rankify next travel --json
 rankify answer travel --round 23 2 1 3
 ```
+
+For a pair or a pick, give one number: the better or the best item. For an ordering, give every number best first, or all but the last. "Can't decide" on a pair counts as a tie. On a pick or an ordering it is recorded but teaches nothing, and that set isn't asked again.
 
 `next --mode exact` asks this session in another mode without changing the list. A script that measures answer times itself can pass them with `answer --ms 2400`. The benchmark does this, so the planner learns the judge's pace.
 
@@ -94,7 +100,7 @@ rankify why travel --round 17     # why that round was asked
 rankify report travel --format md # report for an AI agent; md or json
 ```
 
-`why` lists the pairs the planner weighed, best first. For each pair it shows the expected bits about their order that matter for the mode, the expected answer time, and how likely the first item was to win. It works for rounds the planner chose. Calibration repeats, undos and baseline methods have no plan to show.
+`why` lists the rounds the planner weighed, best first: pairs, picks and orderings. For each it shows the expected bits about the order of the shown items, counting only the pairs that matter for the mode, and the expected answer time. `--json` adds how likely the first item of a pair was to win, and the planner's time guesses for each kind and size of round. It works for rounds the planner chose. Calibration repeats, undos and baseline methods have no plan to show.
 
 ## Manage data
 
@@ -110,10 +116,13 @@ rankify rebuild travel            # rebuild derived data after an engine upgrade
 ```sh
 rankify bench --items 10,20 --runs 20 --report experiments/2026-10-12-human-judge.md
 rankify bench --judges human,perfect,noisy --methods rankify,elo,glicko2
+rankify bench --methods rankify,rankify-mixed --set-time-scale 0.5 --cache half.jsonl
 rankify new demo "Demo" --items items.txt --method trueskill   # run any method by hand
 ```
 
 `bench` draws hidden scores and runs every method through these same commands. A simulated judge answers each round, and the default is one that behaves like a person.
+
+In `--methods`, `rankify` is rankify as shipped, and `rankify-mixed` is a list made with `--rounds mixed`. Both run once per mode. `--set-time-scale` multiplies how long the judge takes on pick and rank rounds, to test how much a result depends on that guess. `--cache` saves each finished run, so an interrupted benchmark resumes. Use a separate cache for each scale.
 
 `--method` picks the ranking method for a list. `rankify` is the default. The others are baselines to compare against:
 

@@ -72,7 +72,11 @@ The pilot (Part 2) checks which of these real people resemble.
 
 ### Simulated time
 
-Each round costs simulated seconds. A pair costs 3 s, a pick of 4 costs 5 s, and ordering 3, 4 or 5 items costs 6, 9 or 13 s. These are guesses. So that no conclusion hinges on them, every comparison of round types is repeated with multi-item rounds costing half as much, and then twice as much.
+Each round costs simulated seconds. A pair takes 2 s, plus up to 3 s more on a close call (the distance effect). Ordering k items takes one such call per neighbour in the judge's order. Picking the best of k takes one call between the best two, plus 1 s per other item. Every time is multiplied by random noise (lognormal, spread 0.25). These are guesses. So that no conclusion hinges on them, every comparison of round types is repeated with pick and rank rounds taking half as long, and then twice as long (`bench --set-time-scale 0.5` and `2`).
+
+The planner doesn't know these times. It starts from its own guesses (DESIGN.md) and switches to the judge's measured times as answers come in.
+
+Fatigue grows with the calls made, not the rounds: ordering k items counts as k − 1 calls.
 
 ### Methods compared
 
@@ -224,3 +228,13 @@ Results go in `experiments/`, one report per run, linked from here.
   - **Perfect judge:** 20 items took 40, 68 and 81 rounds to Quick, Stable and Exact. Elo took 191, 374 and never. rankify was right at every stop (60 of 60).
   - **Calibration:** error 0.038–0.049 (G5 met). Could be covered 90–98% with the human judge (G6 met on 20 items, slightly too wide on 10).
   - **Same answers in a different order:** rankify's #1 never changed (0 of 80). Elo's changed in 9 of 80.
+- **Phase 3 tuning** (seeds 40000+ and 50000+, which the benchmark never uses; 12 lists per setting, human judge). Mixed rounds against pairs only.
+  - The first mixed planner summed the information over every pair in a set. It chose orderings for about 90% of rounds and was slower than pairs for Quick: 2.8 times the time on 10 items and 1.85 times on 20, as the median of paired lists.
+  - Posterior draws showed why. For five items of unknown order, the sum is 1.87 bits, while the exact information about their order is 0.99. Counting only neighbour pairs gives 0.75, within 25% and on the low side, and is exact for a pair. The planner now counts neighbours.
+  - With neighbours counted, mixed rounds were still no faster than pairs on these lists.
+  - The stopping rules were checked with judges that drop one human trait at a time (no lapses, no fatigue, or neither) and with the model's own judge. Confidence stayed calibrated (error 0.02–0.07). Early stops come from the per-pair stopping rules, not from overconfidence: even the model's own judge met the whole-order Exact target at only 1 of 8 stops.
+- [2026-10-12: Phase 3, mixed rounds](experiments/2026-10-12-phase3-mixed-rounds.md), with pick and rank times [halved](experiments/2026-10-12-phase3-set-time-half.md) and [doubled](experiments/2026-10-12-phase3-set-time-double.md). 1,120 runs, none failed. In these reports `rankify` is the mixed planner and `rankify-pairs` is what ships.
+  - **G3 is not met.** Mixed rounds' time as a share of pairs only, with the guessed times: 10-item Quick 74%, 10-item Stable 121%, 20-item Quick 108%. At half the time they are 33%, 75% and 45%. At twice the time they are 158%, 139%, and 20-item Quick is not reached in most lists. Pairs stay the default.
+  - **Pairs only (as shipped):** 10-item Quick took 64% of Elo's time and 75% of Just Sort It's. 10-item Stable took 66% and 94%. 20-item Quick took 26% and 57%. These are close to the Phase 2 v2 numbers.
+  - **Stopping:** on 10 items, mixed rounds stopped sooner (Quick 3.6 min against 4.0, Stable 5.1 against 5.9), and the true #1 was on top at every Quick stop (20 of 20; pairs 17 of 20). On 20 items they stopped a little later. Exact stopped with 88% of neighbour pairs right on 10 items and 78% on 20, short of G8's 95%. Pairs only reached 94% on 10 items, and on 20 items it never stopped in Exact.
+  - **Calibration:** error 0.041–0.047 for mixed rounds and 0.043–0.048 for pairs (G5 met). The #1 never changed when answers were replayed in another order (0 of 80 for both).

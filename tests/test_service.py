@@ -6,6 +6,7 @@ from rankify.service import RankifyError
 from .conftest import SimulatedJudge, kendall_tau, run_rounds
 
 NAMES = ["Kyoto", "Lisbon", "Reykjavik", "Cape Town", "Buenos Aires"]
+PAIRS = {"rounds": "pairs"}  # for tests of how a pair answer is handled
 
 
 def test_new_list_ranks_every_item_equally(rk):
@@ -18,7 +19,7 @@ def test_new_list_ranks_every_item_equally(rk):
 
 
 def test_next_round_stays_open_until_answered(rk):
-    rk.create_list("travel", "Places", NAMES, seed=1)
+    rk.create_list("travel", "Places", NAMES, seed=1, **PAIRS)
     first = rk.next_round("travel")
     assert rk.next_round("travel") == first
     rk.answer("travel", [1])
@@ -26,7 +27,7 @@ def test_next_round_stays_open_until_answered(rk):
 
 
 def test_answer_moves_the_winner_up(rk):
-    rk.create_list("travel", "Places", NAMES, seed=1)
+    rk.create_list("travel", "Places", NAMES, seed=1, **PAIRS)
     view = rk.next_round("travel")
     winner, loser = view.items[1].name, view.items[0].name
     rk.answer("travel", [2])
@@ -35,7 +36,7 @@ def test_answer_moves_the_winner_up(rk):
 
 
 def test_answer_checks_round_and_numbers(rk):
-    rk.create_list("travel", "Places", NAMES, seed=1)
+    rk.create_list("travel", "Places", NAMES, seed=1, **PAIRS)
     with pytest.raises(RankifyError, match="no round"):
         rk.answer("travel", [1])
     view = rk.next_round("travel")
@@ -49,7 +50,7 @@ def test_answer_checks_round_and_numbers(rk):
 
 
 def test_cant_decide_is_an_answer(rk):
-    rk.create_list("travel", "Places", NAMES, seed=1)
+    rk.create_list("travel", "Places", NAMES, seed=1, **PAIRS)
     rk.next_round("travel")
     rk.answer("travel", cant_decide=True)
     ranking = rk.ranking("travel")
@@ -58,7 +59,7 @@ def test_cant_decide_is_an_answer(rk):
 
 
 def test_undo_cancels_and_asks_again(rk):
-    rk.create_list("travel", "Places", NAMES, seed=1)
+    rk.create_list("travel", "Places", NAMES, seed=1, **PAIRS)
     before = rk.ranking("travel")
     asked = rk.next_round("travel")
     rk.answer("travel", [1])
@@ -75,7 +76,7 @@ def test_undo_cancels_and_asks_again(rk):
 
 
 def test_removed_item_is_hidden_but_its_answers_count(rk):
-    rk.create_list("travel", "Places", NAMES, seed=1)
+    rk.create_list("travel", "Places", NAMES, seed=1, **PAIRS)
     view = rk.next_round("travel")
     loser = view.items[1].name
     rk.answer("travel", [1])

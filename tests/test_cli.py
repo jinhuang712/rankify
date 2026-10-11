@@ -16,7 +16,18 @@ def test_full_session_through_the_cli(tmp_path):
     items = tmp_path / "items.txt"
     items.write_text("Kyoto\nLisbon\n\nReykjavik\n", encoding="utf-8")
 
-    result = call(db, "new", "travel", "Places I want to go", "--items", str(items), "--seed", "3")
+    result = call(
+        db,
+        "new",
+        "travel",
+        "Places I want to go",
+        "--items",
+        str(items),
+        "--seed",
+        "3",
+        "--rounds",
+        "pairs",
+    )
     assert result.exit_code == 0, result.output
     assert "3 items" in result.output
 
@@ -69,6 +80,48 @@ def test_undo_and_cant_decide(tmp_path):
     assert result.exit_code == 0, result.output
     assert "Asking it again" in result.output
     assert json.loads(call(db, "show", "pets", "--json").output)["answers"] == 0
+
+
+def test_rank_rounds_through_the_cli_and_play(tmp_path):
+    db = tmp_path / "cli.db"
+    items = tmp_path / "items.txt"
+    items.write_text("\n".join(f"item-{k}" for k in range(8)), encoding="utf-8")
+    call(
+        db,
+        "new",
+        "r",
+        "R",
+        "--items",
+        str(items),
+        "--seed",
+        "3",
+        "--mode",
+        "exact",
+        "--rounds",
+        "mixed",
+    )
+    for _ in range(40):
+        round_ = json.loads(call(db, "next", "r", "--json").output)
+        if round_["kind"] == "rank":
+            break
+        call(db, "answer", "r", "1")
+    else:
+        raise AssertionError("no rank round in 40 rounds")
+    assert "best first" in call(db, "next", "r").output
+    k = len(round_["items"])
+    digits = "".join(str(x) for x in range(k, 0, -1))
+    result = call(db, "answer", "r", digits)
+    assert result.exit_code == 0, result.output
+    ranking = json.loads(call(db, "show", "r", "--json").output)
+    shown = [i["name"] for i in round_["items"]]
+    places = [next(r["rank"] for r in ranking["items"] if r["name"] == x) for x in shown]
+    assert places == sorted(places, reverse=True)  # the last shown is now the highest
+
+    # play: a pair or a pick takes one key, a ranking every number but the last
+    answers = ranking["answers"]
+    result = runner.invoke(app, ["--db", str(db), "play", "r", "--rounds", "3"], input="12345" * 6)
+    assert result.exit_code == 0, result.output
+    assert json.loads(call(db, "show", "r", "--json").output)["answers"] == answers + 3
 
 
 def test_db_can_come_from_the_environment(tmp_path, monkeypatch):

@@ -57,21 +57,22 @@ def test_answer_to_next_round_under_50ms(tmp_path):
     names = [f"item-{k:03d}" for k in range(N_ITEMS)]
     truth = dict(zip(names, rng.normal(0, 1.5, N_ITEMS), strict=True))
     rk = Rankify(store.connect(tmp_path / "perf.db"))
-    rk.create_list("big", "Big", names, seed=1, mode="exact")
+    rk.create_list("big", "Big", names, seed=1, mode="exact", rounds="mixed")  # the slower kind
 
-    def pick(view) -> int:  # a judge with real preferences, so the planner keeps asking
-        a, b = (truth[i.name] for i in view.items)
-        return 1 if rng.random() < 1 / (1 + np.exp(-(a - b))) else 2
+    def pick(view) -> list[int]:  # a judge with real preferences, so the planner keeps asking
+        noisy = np.array([truth[i.name] for i in view.items]) + rng.gumbel(size=len(view.items))
+        order = [int(k) + 1 for k in np.argsort(-noisy)]
+        return order if view.kind == "rank" else order[:1]
 
     for _ in range(300):
         view = rk.next_round("big")
-        rk.answer("big", [pick(view)])
+        rk.answer("big", pick(view))
 
     save_times, total_times = [], []
     for _ in range(15):
         view = rk.next_round("big")
         t0 = time.perf_counter()
-        rk.answer("big", [pick(view)], round_seq=view.round)
+        rk.answer("big", pick(view), round_seq=view.round)
         rk.next_round("big")
         total_times.append((time.perf_counter() - t0) * 1000)
     conn = store.connect(tmp_path / "save.db")

@@ -2,7 +2,7 @@
 
 Rank anything by answering a few quick questions, with real statistics behind every answer.
 
-> **Status: Phase 2 done.** rankify picks each pair by how much it teaches about the order you care about. It stops when your mode's confidence target is reached or nothing is left worth asking, and `rankify why` explains any question. Against a simulated human judge on 20 items, it reaches the right top 3 in about a quarter of Elo's time. Questions about 3–5 items come in Phase 3 (see [ROADMAP.md](ROADMAP.md) and [EXPERIMENT.md](EXPERIMENT.md#results)).
+> **Status: Phase 3 done.** rankify picks each pair by how much it teaches about the order you care about. It stops when your mode's confidence target is reached or nothing is left worth asking, and `rankify why` explains any question. Against a simulated human judge on 20 items, it reaches the right top 3 in about a quarter of Elo's time. Lists made with `--rounds mixed` also ask "pick the best" and "put these in order" for 3–5 items. In the benchmark that saved time only if ordering is quicker than our guess, so it isn't the default until real answer times are measured (see [ROADMAP.md](ROADMAP.md#phase-3-mixed-rounds) and [EXPERIMENT.md](EXPERIMENT.md#results)).
 
 ## Try it
 
@@ -23,7 +23,7 @@ Ranking a whole list by hand is hard, and the result is hard to trust. Elo-style
 rankify keeps the separate judgments and the math, and cuts the waste:
 
 - Every question is chosen to be decisive: one whose answer rankify can't already predict.
-- A round can be a pair, "pick the best of these", or "put these in order". The math picks whichever tells it the most per second of your time.
+- A round can be a pair, "pick the best of these", or "put these in order" (for now, only with `--rounds mixed`). The math picks whichever tells it the most per second of your time.
 - Scores come from one model fitted to all answers at once, so the same answers always give the same result, in any order.
 - You choose how sure you need to be (Quick, Stable or Exact), and rankify shows how many rounds are probably left.
 
@@ -88,6 +88,7 @@ The books, papers and software that rankify builds on or measures itself against
 - Ford, L. R. & Johnson, S. M. (1959). A tournament problem. *American Mathematical Monthly*. Merge insertion, which gets close to the fewest comparisons a sort can use.
 - † Houlsby, N., Huszár, F., Ghahramani, Z. & Lengyel, M. (2011). [Bayesian active learning for classification and preference learning](https://arxiv.org/abs/1112.5745). BALD. rankify's planner uses the same idea, aimed at the order of each pair rather than the scores.
 - † Maystre, L. & Grossglauser, M. (2017). [Just sort it! A simple and effective approach to active preference learning](https://proceedings.mlr.press/v70/maystre17a.html). *ICML*. Repeated quicksort; the strong reference baseline.
+- † MacKay, D. J. C. (1992). [Information-based objective functions for active data selection](https://mlanthology.org/neco/1992/mackay1992neco-informationbased). *Neural Computation* 4(4). Expected information from a Gaussian (Laplace) posterior. rankify scores picks and orderings the same way: the answer's expected Fisher information shrinks the posterior, and the planner counts how much less uncertain each pair's order becomes.
 - † Saha, A. & Gopalan, A. (2019). [Active ranking with subset-wise preferences](https://arxiv.org/abs/1810.10321). *AISTATS*. Finds that "pick the best" is no faster than pairs, while ordering m items is up to m times faster.
 - Chen, X., Bennett, P. N., Collins-Thompson, K. & Horvitz, E. (2013). Pairwise ranking aggregation in a crowdsourced setting. *WSDM*. Crowd-BT, which weighs judges by reliability. Relevant once many people rank one list.
 
@@ -105,7 +106,7 @@ The books, papers and software that rankify builds on or measures itself against
 
 - MacKay, D. J. C. (1992). Bayesian interpolation. *Neural Computation*. The evidence framework: rankify learns its prior width by maximizing the evidence.
 - Dempster, A. P., Laird, N. M. & Rubin, D. B. (1977). Maximum likelihood from incomplete data via the EM algorithm. *Journal of the Royal Statistical Society, Series B*. The algorithm that finds that width.
-- Aitken, A. C. (1926). On Bernoulli's numerical solution of algebraic equations. *Proceedings of the Royal Society of Edinburgh*. Aitken's acceleration, which speeds up the EM steps.
+- Aitken, A. C. (1926). On Bernoulli's numerical solution of algebraic equations. *Proceedings of the Royal Society of Edinburgh*. Aitken's acceleration, tried first to speed up the EM steps. It ran the wrong way when the best width was far from the start, so rankify uses secant steps that must agree with the EM step.
 
 ### Software
 

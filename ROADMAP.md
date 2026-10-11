@@ -74,6 +74,38 @@ This phase adds:
 
 **Check:** run the full grid, including the half-time and double-time runs. If mixed rounds don't save time (G3), ship pairs only and keep mixed rounds behind a flag.
 
+**Result (2026-10-12): G3 not met. Pairs stay the default, and mixed rounds ship behind `new --rounds mixed`.**
+
+What was built:
+
+- Pick and rank rounds of 3 to 5 items, fitted with pairs in one Plackett–Luce model. The fit matches `choix` and stays independent of answer order.
+- A mixed planner. It grows sets from the best pairs and scores them by the information about their order from neighbour pairs, per second, with per-kind timing that learns your own times.
+- `new --rounds`, answers like `3142`, multi-key `play`, and `why` for sets.
+- In the benchmark: the mixed variant, the round mix, goal G8 at each stop, and `--set-time-scale`.
+- Answer→next stays fast with mixed rounds: p95 42.5 ms at 200 items (G4). The planner now reuses the fit that `answer` just made.
+
+How mixed rounds compare with pairs only, as a share of the time to each target (human judge, 20 lists; [main report](experiments/2026-10-12-phase3-mixed-rounds.md), [half](experiments/2026-10-12-phase3-set-time-half.md), [double](experiments/2026-10-12-phase3-set-time-double.md)):
+
+- **Pick and rank times as guessed:** 10-item Quick 74%, 10-item Stable 121%, 20-item Quick 108%.
+- **Half the guessed time:** 33%, 75% and 45%.
+- **Twice the guessed time:** 158%, 139%, and 20-item Quick not reached in most lists.
+
+So the outcome depends on how long a person really takes to order a few items, which nobody has measured yet. In the benchmark's judge, ordering k items costs as much as asking its k − 1 neighbour pairs one at a time. An ordering then teaches about as much per second as pairs, and it gives up choosing each next question from the latest answer. With the perfect judge, mixed rounds were faster in 4 of 6 settings, equal in 1 and slower in 1.
+
+Pairs only, as shipped, against the baselines in the same run:
+
+- **10 items:** Quick 64% of Elo's time and 75% of Just Sort It's. Stable 66% and 94%.
+- **20 items:** Quick 26% of Elo's time and 57% of Just Sort It's.
+- **Calibration:** error 0.043–0.048 (G5).
+
+Lessons:
+
+- **A first version counted every pair in a set,** which counted the same information about twice. It chose orderings for about 90% of rounds and was slower than pairs on the tuning lists. Counting only neighbour pairs fixed the measure, but not the outcome.
+- **The stopping rules settle each neighbour pair, while the benchmark's targets need the whole order.** So "target really met at the stop" is lower than each pair's confidence suggests: 19 neighbour pairs at 95% each are all right only about 38% of the time. The report now also shows G8, which is defined per pair. With mixed rounds, Exact on 20 items stopped with 78% of pairs right, short of G8's 95%.
+- **Reproducibility:** 11 of 36 cached Phase 2 runs don't come out the same from the committed Phase 2 code. They were probably saved by an earlier state of the code during Phase 2. The committed Phase 2 code and today's pairs-only planner agree on every list checked. This benchmark reran everything from scratch.
+
+Next: Phase 5's pilot measures how long ordering really takes. If people are clearly faster per item than with pairs, rerun G3 with those times and reconsider the default.
+
 ## Phase 4: Rounds left, terminal UI and report
 
 This phase adds:

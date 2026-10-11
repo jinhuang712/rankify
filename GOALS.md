@@ -10,7 +10,9 @@ Each goal has a measure and a target. The targets are our starting proposal. We 
 
 **G2. Faster than the strong baseline.** Reaching each mode's target takes at least 20% less simulated time than Just Sort It. If we can't manage that, we use Just Sort It's way of picking questions.
 
-**G3. Mixed rounds pay off.** Using all round types (pair, pick, rank) takes less time than using pairs only. This must hold under the default timing model and under the timing model measured in the pilot.
+**G3. Mixed rounds pay off.** Using all round types (pair, pick, rank) takes less time than using pairs only. This must hold under the guessed timing model, and with pick and rank rounds taking half and twice the guessed time.
+
+*Changed 2026-10-12, before the Phase 3 benchmark ran:* the second condition was "the timing model measured in the pilot". No session has measured how long a person takes to pick from or rank 3 to 5 items yet, so the halved and doubled times stand in for it. When real times exist, the comparison runs again (Phase 5).
 
 **G4. Instant.** For lists of up to 200 items, the time from answer to next round is under 50 ms at the 95th percentile. The forecast finishes within 1 second, in the background.
 

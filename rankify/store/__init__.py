@@ -542,6 +542,16 @@ def timing_samples(conn, list_id: int, judge: int) -> list[tuple[float, float]]:
     return [(r["z"], r["ms"] / 1000.0) for r in rows]
 
 
+def set_timing_samples(conn, list_id: int, judge: int) -> list[tuple[str, int, float]]:
+    """(kind, items shown, seconds taken) for the judge's answered pick and rank rounds."""
+    rows = conn.execute(
+        "SELECT kind, shown, ms FROM rounds WHERE list_id = ? AND judge_id = ?"
+        " AND kind != 'pair' AND outcome = 'answered' AND ms IS NOT NULL",
+        (list_id, judge),
+    ).fetchall()
+    return [(r["kind"], len(json.loads(r["shown"])), r["ms"] / 1000.0) for r in rows]
+
+
 def log(conn, level: str, event: str, data: dict | None = None) -> None:
     conn.execute(
         "INSERT INTO logs(ts, level, event, data) VALUES (?, ?, ?, ?)",

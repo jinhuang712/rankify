@@ -55,7 +55,10 @@ def test_play_answers_with_single_keys(tmp_path):
     db = str(tmp_path / "p.db")
     items = tmp_path / "items.txt"
     items.write_text("A\nB\nC\nD\n", encoding="utf-8")
-    runner.invoke(app, ["--db", db, "new", "p", "P", "--items", str(items), "--seed", "1"])
+    runner.invoke(
+        app,
+        ["--db", db, "new", "p", "P", "--items", str(items), "--seed", "1", "--rounds", "pairs"],
+    )
     result = runner.invoke(app, ["--db", db, "play", "p"], input="x1\n2tuq")
     assert result.exit_code == 0, result.output
     assert "can't decide" in result.output and "undone" in result.output

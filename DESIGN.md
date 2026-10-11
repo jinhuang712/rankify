@@ -32,11 +32,11 @@ Each item has one hidden score. A single family of models explains every round t
 
 Three additions keep the model honest:
 
-- **"Can't decide" is a real answer.** For pairs we use Davidson's extension of Bradley–Terry, which models ties. In v1, "can't decide" in a pick or rank round is recorded but not used.
+- **"Can't decide" is a real answer.** For pairs we use Davidson's extension of Bradley–Terry, which models ties. In v1, "can't decide" in a pick or rank round is recorded but not used, and that set is not asked again.
 - **Position bias is measured.** Each display slot gets a small fitted bonus, so a habit of choosing the first item doesn't leak into the scores.
 - **Every score starts in the middle, with a wide range.** This gives the fit a single answer and keeps new or rarely seen items from jumping around. The width of that starting range is learned from how consistent the judge is, so a very consistent judge's answers count for more.
 
-The model has two known limits. It assumes taste lies on one axis. It also assumes that adding a third option doesn't change the odds between two others. Similar items can break the second assumption, so the planner keeps near-identical items out of pick rounds. The report flags answers the model can't explain, which is where either limit would show up.
+The model has two known limits. It assumes taste lies on one axis. It also assumes that adding a third option doesn't change the odds between two others. Similar items can break the second assumption, so a pick or rank round never shows two items the model already holds to be tied. That catches near-identical items once their scores have met. It can't see that two items are alike before the answers show it. The report flags answers the model can't explain, which is where either limit would show up.
 
 ## Fitting
 
@@ -44,11 +44,11 @@ After each round, the model is fitted to all answers at once. This is what makes
 
 The fit starts from the previous scores, so one new answer needs only a few Newton steps. Each item's range comes from the curvature of the fit around its best value (the Laplace approximation). Score, Confidence and Could be all follow from the scores and their ranges. Two items that are confidently close become a confident tie, shown as `=`, and the planner stops asking about them.
 
-**The prior width is learned.** Every score starts at Normal(0, σ²), and σ is learned from the answers (MacKay 1992). A consistent judge spreads items far apart, so σ grows and each answer counts for more. A judge who contradicts themself keeps σ narrow. The width maximizes the evidence, found by expectation-maximization over the Laplace posterior (Dempster, Laird & Rubin 1977) with Aitken's acceleration. A weak prior on log σ, centred at 1.5, stops σ from collapsing on lists with few answers. Like the scores, σ depends only on the set of answers.
+**The prior width is learned.** Every score starts at Normal(0, σ²), and σ is learned from the answers (MacKay 1992). A consistent judge spreads items far apart, so σ grows and each answer counts for more. A judge who contradicts themself keeps σ narrow. The width maximizes the evidence, found by expectation-maximization over the Laplace posterior (Dempster, Laird & Rubin 1977), sped up by secant steps. Aitken's acceleration was tried first and failed to converge when the best width was far from the start. A weak prior on log σ, centred at 1.5, stops σ from collapsing on lists with few answers. Like the scores, σ depends only on the set of answers.
 
 ## Choosing the next round
 
-The planner looks for the question that teaches the most about the **order** per second of your time, about the part of the ranking your mode cares about. For now it asks pairs. Sets of three to five come in Phase 3.
+The planner looks for the question that teaches the most about the **order** per second of your time, about the part of the ranking your mode cares about. A question is a pair. A list made with `new --rounds mixed` can also ask a pick ("which is best?") or an ordering ("put these in order") of 3 to 5 items. That is not the default, because in the Phase 3 benchmark it saved time on some targets and cost time on others (ROADMAP.md).
 
 For each candidate pair, it estimates the mutual information between your answer and which of the two items is really better. This is in the spirit of BALD (Houlsby et al. 2011), but aimed at the order. Plain BALD measures information about the scores, so it kept asking pairs whose order was already settled, just to sharpen the size of their gap. The order measure is zero for pairs whose order is known. It is also zero for pairs already known to be tied, whose answer is a coin flip that teaches nothing.
 
@@ -56,13 +56,19 @@ Each pair's information is weighted by how much the pair matters for the mode: t
 
 **Every item gets a first look.** Before the planner judges any item unimportant, every item gets at least two answers: the least-seen item goes against its most informative partner. Without this, an item that has barely been compared sits mid-ranking with a wide range and never looks like a contender. In one benchmark list, the clearly best item lost its first comparison to a slip and was never asked about again.
 
+**Picks and orderings** are scored the same way, summed over the neighbour pairs they show: for each pair of items next to each other in the set's current order, how much the answer settles which of the two is better, times how much that pair matters for the mode. Only neighbours count because the rest of the order follows from them. A first version summed over every pair, which counted the same information about twice for an uncertain set of five, and it chose orderings for about 90% of rounds while being slower than pairs alone. Counting neighbours comes within about 25% of the exact information about the set's order, on the low side.
+
+The exact value needs thousands of posterior draws per candidate, which is too slow between rounds. The planner uses a Gaussian shortcut instead. The answer's expected Fisher information shrinks the covariance of the shown items (a Laplace update), and each pair's uncertainty about its order shrinks with it. On test cases this stays within about 20% of the exact value. Candidates grow from the two best pairs, one item at a time up to 5, each time adding the item that adds the most. The best pairs are scored the same way, so every kind competes on one scale.
+
+A pick or ordering's time starts as a guess, as a multiple of your typical pair: 1.33, 1.67 and 2 for picking from 3, 4 and 5 items, and 2, 3 and 4.33 for ordering them. After 8 timed answers of one kind and size, your own median replaces the guess. Stopping still looks at pairs only, by the same rules as before, so a list stops for the same reasons whichever kinds of round it asks.
+
 The best candidate wins, and its display order is shuffled with the round's seed. The candidates the planner weighed are saved, so `rankify why` can explain the choice.
 
 **Stopping.** The session stops when the mode's target is reached. It also stops when nothing is worth asking: even 8 more answers to the most useful pair would teach less than 0.1 bits about the order that matters. The test looks at several answers, not one, on purpose. A judge who gets a pair right 60% of the time teaches only about 0.03 bits per answer (1 − h(0.6)), but those bits add up. A one-answer test stopped far too early on crowded lists. The 0.1-bit threshold was tuned on hidden lists the benchmark never uses (EXPERIMENT.md).
 
 Calibration lists (`--calibrate`) keep random pairs with swapped repeats. That is the design the calibration's bias correction simulates.
 
-Multi-item rounds help only in some situations. Saha & Gopalan (2019) show that with noisy answers, "pick the best of k" is no faster than pairs, while ordering the top m items is about m times faster. So picks pay off mainly when one item clearly stands out, and orderings pay off when a few items are close. The planner doesn't need these as hard-coded rules. They fall out of the gain-per-second scoring.
+Multi-item rounds help only in some situations. Saha & Gopalan (2019) show that with noisy answers, "pick the best of k" is no faster than pairs, while ordering the top m items is about m times faster. So picks pay off mainly when one item clearly stands out, and orderings pay off when a few items are close. The planner doesn't need these as hard-coded rules. They fall out of the gain-per-second scoring. Whether the scoring gets them right is a question for the benchmark (goal G3).
 
 ## Modes
 

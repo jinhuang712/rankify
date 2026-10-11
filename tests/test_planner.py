@@ -10,8 +10,21 @@ from rankify.bench import Judge, hidden_scores, targets_met
 from rankify.cli.main import app
 from rankify.engine.fit import fit_pairs_learning_sigma
 from rankify.engine.model import A_WINS, B_WINS, Pairs
-from rankify.engine.planner import Timing, order_information
+from rankify.engine.planner import MIN_LOOKS, Timing, order_information
 from rankify.service import NothingToAsk, Rankify, RankifyError
+
+from .conftest import first_listed
+
+
+def answer_as(judge: Judge, rk: Rankify, slug: str, view, t: int) -> None:
+    """Answer any kind of round as the benchmark's simulated judge would."""
+    names = [i.name for i in view.items]
+    if view.kind == "pair":
+        pick, secs = judge.answer(names, t)
+        numbers = None if pick is None else [pick]
+    else:
+        numbers, secs = judge.answer_set(names, view.kind, t)
+    rk.answer(slug, numbers, cant_decide=numbers is None, ms=int(secs * 1000))
 
 
 def test_order_information_ignores_settled_pairs_and_known_ties():
@@ -59,16 +72,21 @@ def test_quick_target_needs_every_lower_item_out_of_reach():
     assert not stop.target_reached("quick", nb, reachable)
 
 
-def test_every_item_gets_first_looks_before_it_is_judged(rk):
-    rk.create_list("f", "F", [f"item-{k}" for k in range(8)], seed=4, mode="quick")
-    looks = {}
-    for _ in range(6):
+@pytest.mark.parametrize("rounds", ["mixed", "pairs"])
+def test_every_item_gets_first_looks_before_it_is_judged(rk, rounds):
+    names = [f"item-{k}" for k in range(8)]
+    rk.create_list("f", "F", names, seed=4, mode="quick", rounds=rounds)
+    looks = dict.fromkeys(names, 0)
+    for _ in range(20):
         view = rk.next_round("f")
-        assert rk.why("f", view.round).reason == "first look"
+        if rk.why("f", view.round).reason != "first look":
+            break
         for item in view.items:
-            looks[item.name] = looks.get(item.name, 0) + 1
-        rk.answer("f", [1])
-    assert len(looks) >= 6  # spread over the list, not piled on one pair
+            looks[item.name] += 1
+        rk.answer("f", first_listed(view))
+    else:
+        raise AssertionError("first looks never ended")
+    assert min(looks.values()) >= MIN_LOOKS
 
 
 def test_a_best_item_that_loses_its_first_comparison_is_still_found():
@@ -85,11 +103,7 @@ def test_a_best_item_that_loses_its_first_comparison_is_still_found():
             view = rk.next_round("q")
         except NothingToAsk:
             break
-        pick, secs = judge.answer([i.name for i in view.items], t)
-        if pick is None:
-            rk.answer("q", cant_decide=True, ms=int(secs * 1000))
-        else:
-            rk.answer("q", [pick], ms=int(secs * 1000))
+        answer_as(judge, rk, "q", view, t)
     best = max(names, key=lambda x: theta[x])
     assert [i.name for i in rk.ranking("q").items][:3].count(best) == 1
 
@@ -169,10 +183,8 @@ def test_perfect_judge_session_stops_with_the_target_really_met(mode):
         except NothingToAsk as e:
             assert "target reached" in str(e)
             break
-        pair = [i.name for i in view.items]
-        asked.append(frozenset(pair))
-        pick, secs = judge.answer(pair, t)
-        rk.answer("p", [pick], ms=int(secs * 1000))
+        asked.append(frozenset(i.name for i in view.items))
+        answer_as(judge, rk, "p", view, t)
     else:
         raise AssertionError("never stopped")
     ranking = rk.ranking("p")
@@ -197,10 +209,10 @@ def test_why_explains_a_planned_round_and_mode_can_be_overridden(tmp_path):
             app, ["--db", db, "why", "w", "--round", str(round_["round"]), "--json"]
         ).stdout
     )
-    assert {data["chosen"]["first_name"], data["chosen"]["second_name"]} == {
-        i["name"] for i in round_["items"]
-    }
-    runner.invoke(app, ["--db", db, "answer", "w", "1", "--ms", "2500"])
+    assert data["chosen"]["names"] == [i["name"] for i in round_["items"]]
+    assert data["chosen"]["kind"] == round_["kind"]
+    every = ["1"] if round_["kind"] == "pick" else [str(i["n"]) for i in round_["items"]]
+    runner.invoke(app, ["--db", db, "answer", "w", *every, "--ms", "2500"])
     result = runner.invoke(app, ["--db", db, "next", "w", "--mode", "exact", "--json"])
     assert result.exit_code == 0, result.output
     rk = Rankify(__import__("rankify").store.connect(tmp_path / "w.db"))

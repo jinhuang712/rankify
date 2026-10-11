@@ -18,7 +18,8 @@ def rk(conn):
 
 
 class SimulatedJudge:
-    """Answers pair rounds by Bradley-Terry with hidden true scores, keyed by item name."""
+    """Answers rounds by Bradley-Terry (pairs) and Plackett-Luce (picks and rankings) with
+    hidden true scores, keyed by item name."""
 
     def __init__(self, truth: dict[str, float], seed: int):
         self.truth = truth
@@ -28,6 +29,18 @@ class SimulatedJudge:
         a, b = (self.truth[n] for n in names)
         p_first = 1.0 / (1.0 + np.exp(-(a - b)))
         return 1 if self.rng.random() < p_first else 2
+
+    def answer(self, kind: str, names: list[str]) -> list[int]:
+        if kind == "pair":
+            return [self.pick(names)]
+        noisy = np.array([self.truth[n] for n in names]) + self.rng.gumbel(size=len(names))
+        order = [int(k) + 1 for k in np.argsort(-noisy)]
+        return order if kind == "rank" else order[:1]
+
+
+def first_listed(view) -> list[int]:
+    """An answer that prefers items in the order shown, for any kind of round."""
+    return list(range(1, len(view.items) + 1)) if view.kind == "rank" else [1]
 
 
 def run_rounds(
@@ -42,7 +55,7 @@ def run_rounds(
             break
         names = [i.name for i in view.items]
         asked.append(tuple(names))
-        rk.answer(slug, [judge.pick(names)], round_seq=view.round)
+        rk.answer(slug, judge.answer(view.kind, names), round_seq=view.round)
     return asked
 
 
