@@ -1,6 +1,6 @@
 # rankify CLI
 
-> **Partly built.** Working now: `new` (with `--method`), `add`, `remove`, `lists`, `next` (random pairs for rankify), `answer`, `undo`, `show`, `verify` and `bench`. Everything else here is planned. Exit code 3 is used by methods that finish, such as `insertion-sort`. `next --json` returns `"rounds_left": null` and `show --json` returns `"target_reached": null` until the forecast and the stopping rules exist.
+> **Partly built.** Working now: `new` (with `--method` and `--calibrate`), `add`, `remove`, `lists`, `next` (random pairs for rankify), `answer`, `undo`, `show`, `verify`, `bench`, `calibrate`, and a minimal `play`. Everything else here is planned. Exit code 3 is used by methods that finish, such as `insertion-sort`. `next --json` returns `"rounds_left": null` and `show --json` returns `"target_reached": null` until the forecast and the stopping rules exist.
 
 The CLI is the main way to use rankify, and also the way rankify is tested. The terminal UI, the simulator, the test suite and AI agents all drive the same commands.
 
@@ -23,8 +23,16 @@ rankify lists                     # all lists and their progress
 
 ## Rank in the terminal UI
 
+**Built now: a minimal version.** `rankify play` shows one pair at a time and reads single keys: `1` or `2` to pick, `t` for can't decide, `u` to undo, `q` to quit. It times each answer from when the question appears to the keypress. It needs a real terminal, because it reads keys without Enter.
+
 ```sh
-rankify play travel               # uses the list's mode, Stable by default
+rankify play travel               # until you press q
+rankify play travel --rounds 150  # stop after 150 answers
+```
+
+**Planned (Phase 4): the full terminal UI below.**
+
+```sh
 rankify play travel --mode quick
 ```
 
@@ -101,6 +109,17 @@ rankify new demo "Demo" --items items.txt --method trueskill   # run any method 
 - Reference sorts: `just-sort-it` and `insertion-sort`.
 
 Glicko-2, TrueSkill and openskill need the development dependencies (`uv sync`). The benchmark is described in [EXPERIMENT.md](../../EXPERIMENT.md).
+
+## Calibrate the benchmark's human judge
+
+```sh
+rankify new calib "Places I want to go" --items places.txt --calibrate
+rankify play calib --rounds 150
+rankify calibrate calib --out ~/.rankify/judge-me.json
+rankify bench --judge-profile ~/.rankify/judge-me.json
+```
+
+`--calibrate` makes about 15% of rounds repeat an earlier pair with the sides swapped. That measures how consistent you are. `calibrate` then estimates how you answer and marks each setting as measured or kept as the default guess, depending on how many answers the session has. `bench --judge-profile` uses only the measured settings. The method is described in [EXPERIMENT.md](../../EXPERIMENT.md#part-2-calibration-and-pilot).
 
 ## JSON output
 

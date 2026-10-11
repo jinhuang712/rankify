@@ -32,6 +32,8 @@ from statistics import NormalDist
 
 import numpy as np
 
+from rankify.engine.judge import HumanParams, human_answer
+
 RATING_SYSTEMS = ("elo", "elo-close", "glicko2", "trueskill", "openskill", "arena")
 REFERENCE = ("just-sort-it", "insertion-sort")
 DEFAULT_METHODS = ("rankify", *RATING_SYSTEMS, *REFERENCE)
@@ -46,25 +48,7 @@ _PHI = NormalDist()
 # ---------------------------------------------------------------- the judges
 
 
-@dataclass(frozen=True)
-class HumanParams:
-    """How the simulated person answers. Every value is a guess until a real session
-    calibrates it (EXPERIMENT.md, Part 2)."""
-
-    noise: float = 1.0  # spread of the perceived score per answer (Thurstone 1927)
-    fatigue: float = 0.003  # noise grows by this share per round...
-    fatigue_cap: float = 1.6  # ...up to this multiple
-    first_bonus: float = 0.15  # leans toward the item shown first
-    lapse: float = 0.03  # share of answers given at random (Wichmann & Hill 2001)
-    tie_peak: float = 0.3  # chance of "can't decide" when two items are equal...
-    tie_width: float = 0.3  # ...falling off as the gap grows
-    base_seconds: float = 2.0  # time to answer an easy pair
-    close_seconds: float = 3.0  # extra time on a close call (distance effect,
-    close_width: float = 0.6  # Moyer & Landauer 1967)
-    tie_seconds: float = 1.0  # extra time before saying "can't decide"
-
-
-HUMAN = HumanParams()
+HUMAN = HumanParams()  # the guessed person; `rankify calibrate` measures a real one
 SCORE_SPREAD = 1.5  # hidden scores = spread x Student-t(3): a few far out, a crowded middle
 # Pairs closer than this are near-ties the human judge gets right under 55% of the time.
 # Targets ignore swaps between such pairs, the same way rankify shows them as ties.
@@ -87,37 +71,60 @@ class Judge:
         """(1 or 2 for the better item, or None for "can't decide"; seconds taken)."""
         p, rng = self.p, self.rng
         diff = self.theta[shown[0]] - self.theta[shown[1]]
+        if self.kind == "human":
+            return human_answer(p, rng, diff, round_no)
         gap = abs(diff)
         seconds = (p.base_seconds + p.close_seconds * math.exp(-gap / p.close_width)) * float(
             rng.lognormal(0.0, 0.25)
         )
         if self.kind == "perfect":
             return (1 if diff > 0 else 2), seconds
-        if self.kind == "noisy":  # Bradley-Terry: the model rankify itself assumes
-            p_first = 1.0 / (1.0 + math.exp(-1.702 * diff / (math.sqrt(2.0) * p.noise)))
-            return (1 if rng.random() < p_first else 2), seconds
-        if rng.random() < p.lapse:
-            return int(rng.integers(1, 3)), seconds
-        if rng.random() < p.tie_peak * math.exp(-gap / p.tie_width):
-            return None, seconds + p.tie_seconds
-        sd = p.noise * min(1.0 + p.fatigue * round_no, p.fatigue_cap)
-        p_first = _PHI.cdf((diff + p.first_bonus) / (math.sqrt(2.0) * sd))
+        # noisy: Bradley-Terry, the model rankify itself assumes
+        p_first = 1.0 / (1.0 + math.exp(-1.702 * diff / (math.sqrt(2.0) * p.noise)))
         return (1 if rng.random() < p_first else 2), seconds
 
 
-def hidden_scores(names: list[str], rng: np.random.Generator) -> dict[str, float]:
-    return {name: float(SCORE_SPREAD * rng.standard_t(3)) for name in names}
+def hidden_scores(
+    names: list[str], rng: np.random.Generator, spread: float = SCORE_SPREAD
+) -> dict[str, float]:
+    return {name: float(spread * rng.standard_t(3)) for name in names}
 
 
-def list_difficulty(n: int, lists: int = 1000) -> tuple[float, float]:
+def list_difficulty(
+    n: int, params: HumanParams = HUMAN, spread: float = SCORE_SPREAD, lists: int = 1000
+) -> tuple[float, float]:
     """(median chance the human judge orders two neighbours right, share of near-ties)."""
     acc, near = [], []
     for s in range(lists):
-        t = np.sort(SCORE_SPREAD * np.random.default_rng(10**6 + s).standard_t(3, n))[::-1]
+        t = np.sort(spread * np.random.default_rng(10**6 + s).standard_t(3, n))[::-1]
         gaps = t[:-1] - t[1:]
-        acc += [_PHI.cdf(g / (math.sqrt(2.0) * HUMAN.noise)) for g in gaps]
+        acc += [_PHI.cdf(g / (math.sqrt(2.0) * params.noise)) for g in gaps]
         near += list(gaps < TIE_MARGIN)
     return float(np.median(acc)), float(np.mean(near))
+
+
+def load_profile(path: Path) -> dict:
+    """A judge profile written by ``rankify calibrate --out``, ready for ``run_bench``."""
+    data = json.loads(Path(path).read_text(encoding="utf-8"))
+    measured = [k for k in data.get("measured", []) if k in data]
+    params = {k: float(data[k]) for k in measured if k in HumanParams.__dataclass_fields__}
+    guessed = [k for k in HumanParams.__dataclass_fields__ if k not in params and k != "noise"]
+    return {
+        "params": params,  # only what the session measured; the rest keep the guesses
+        "spread": float(data["score_spread"]) if "score_spread" in measured else SCORE_SPREAD,
+        "label": (
+            f"from {data.get('judge', 'a judge')}'s session on '{data.get('list', '?')}' "
+            f"({data.get('answers', '?')} answers, {data.get('date', 'date unknown')}). "
+            f"Measured: {', '.join(measured) or 'nothing'}. Still guesses: {', '.join(guessed)}"
+        ),
+        "notes": list(data.get("notes", [])),
+    }
+
+
+def _unpack(profile: dict | None) -> tuple[HumanParams, float]:
+    if not profile:
+        return HUMAN, SCORE_SPREAD
+    return HumanParams(**profile["params"]), profile["spread"]
 
 
 # ---------------------------------------------------------------- one run
@@ -220,13 +227,16 @@ def targets_met(order: list[str], theta: dict[str, float], margin: float = TIE_M
     return {"quick": quick, "stable": stable, "exact": not inv.any()}
 
 
-def run_one(method: str, judge_kind: str, n: int, seed: int, budget: int) -> RunResult:
+def run_one(
+    method: str, judge_kind: str, n: int, seed: int, budget: int, profile: dict | None = None
+) -> RunResult:
+    params, spread = _unpack(profile)
     rng = np.random.default_rng(seed)
     names = [f"item-{k:02d}" for k in range(n)]
-    theta = hidden_scores(names, rng)
+    theta = hidden_scores(names, rng, spread)
     true_rank = {x: r + 1 for r, x in enumerate(sorted(names, key=lambda x: -theta[x]))}
     index = {name: k for k, name in enumerate(names)}
-    judge = Judge(theta, judge_kind, np.random.default_rng([seed, 1]))
+    judge = Judge(theta, judge_kind, np.random.default_rng([seed, 1]), params)
     res = RunResult(method, judge_kind, n, seed)
     known = np.zeros((n, n), dtype=bool)  # known[w, l]: earlier answers imply w beats l
     seen: set[frozenset] = set()
@@ -354,9 +364,11 @@ def run_bench(
     workers: int = DEFAULT_WORKERS,
     real_cli: bool = True,
     progress=None,
+    profile: dict | None = None,
 ) -> str:
+    """Run the benchmark. ``profile`` (from ``load_profile``) replaces the guessed human judge."""
     tasks = [
-        (m, j, n, 1000 * n + s, budget_per_item * n)
+        (m, j, n, 1000 * n + s, budget_per_item * n, profile)
         for n in sizes
         for j in judges
         for s in range(runs)
@@ -381,7 +393,7 @@ def run_bench(
                     progress(k + 1, len(tasks))
     elapsed = time.perf_counter() - t0
     real = _real_cli_sample() if real_cli else None
-    return _report(results, sizes, judges, methods, runs, budget_per_item, elapsed, real)
+    return _report(results, sizes, judges, methods, runs, budget_per_item, elapsed, real, profile)
 
 
 def _real_cli_sample(calls: int = 5) -> dict[str, float] | None:
@@ -464,13 +476,16 @@ FEATURES = {
 _FEATURE_DEFAULT = {"Chooses informative pairs": "no: random pairs"}
 
 
-def _report(results, sizes, judges, methods, runs, budget_per_item, elapsed, real) -> str:
+def _report(
+    results, sizes, judges, methods, runs, budget_per_item, elapsed, real, profile=None
+) -> str:
     from rankify.engine import ENGINE_VERSION
 
     by: dict[tuple, list[RunResult]] = {}
     for r in results:
         by.setdefault((r.n, r.judge, r.method), []).append(r)
-    p = HUMAN
+    p, spread = _unpack(profile)
+    source = profile["label"] if profile else "all guesses until a real session calibrates them"
     lines = [
         "# Benchmark: rankify against rating systems for human judges",
         "",
@@ -487,7 +502,7 @@ def _report(results, sizes, judges, methods, runs, budget_per_item, elapsed, rea
         ),
         (
             "- Hidden scores: a few clear favourites and a crowded middle (Student-t with 3 degrees "
-            f"of freedom, times {SCORE_SPREAD})."
+            f"of freedom, times {spread:.2f})."
         ),
         "",
         (
@@ -527,7 +542,7 @@ def _report(results, sizes, judges, methods, runs, budget_per_item, elapsed, rea
         ties = 1 - decided / max(1, total)
         secs = statistics.mean(s for r in rs for s in r.seconds)
         lines.append(f"| {j} | {right:.0%} | {ties:.0%} | {secs:.1f} |")
-    difficulty = [(n, *list_difficulty(n)) for n in sizes]
+    difficulty = [(n, *list_difficulty(n, p, spread)) for n in sizes]
     lines += [
         "",
         "How hard the hidden lists are for the human judge, before lapses and fatigue: "
@@ -539,14 +554,15 @@ def _report(results, sizes, judges, methods, runs, budget_per_item, elapsed, rea
         + ".",
         "",
         (
-            f"Human judge settings, all guesses until a real session calibrates them: noise "
-            f"{p.noise}, fatigue +{p.fatigue:.1%} per round (up to ×{p.fatigue_cap}), first-item "
-            f"lean {p.first_bonus}, lapses {p.lapse:.0%}, can't-decide up to {p.tie_peak:.0%}, "
-            f"{p.base_seconds:.0f} s per easy answer plus up to {p.close_seconds:.0f} s on close "
-            "calls."
+            f"Human judge settings: noise {p.noise}, fatigue +{p.fatigue:.1%} per round (up to "
+            f"×{p.fatigue_cap}), first-item lean {p.first_bonus:.2f}, lapses {p.lapse:.0%}, "
+            f"can't-decide up to {p.tie_peak:.0%}, {p.base_seconds:.1f} s per easy answer plus "
+            f"up to {p.close_seconds:.1f} s on close calls. Source: {source}."
         ),
         "",
     ]
+    if profile and profile.get("notes"):
+        lines += ["Calibration notes:", ""] + [f"- {note}" for note in profile["notes"]] + [""]
 
     def method_label(m: str) -> str:
         return f"{m} (reference)" if m in REFERENCE else f"**{m}**" if m == "rankify" else m

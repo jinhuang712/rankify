@@ -39,7 +39,7 @@ This phase builds:
 - **Today rankify is level with the rating systems, not ahead.** On 20 items it reached Quick in 259 rounds; Glicko-2 needed 126 and Elo 315. That is far from the goal of a third of Elo's time (G1).
 - **Exact is out of reach for a human judge on 20 items.** No method got there. That supports precision modes, where Quick and Stable are the realistic targets.
 - **Confidence is calibrated with the human judge** (error 0.017–0.032). With a perfect judge it is still too cautious (0.12–0.13), so the prior width should be learned from each judge's consistency.
-- **The human judge's settings are guesses.** A real session calibrates them once Phase 1 is landed.
+- **The human judge's settings are guesses.** A calibration session replaces the ones it can measure (see Phase 5).
 
 **Check:** run the pairs-only part of the grid. What happens next depends on the result:
 
@@ -69,6 +69,8 @@ This phase adds:
 **Check:** a full session on a 20-item list in the terminal UI, with no visible wait between rounds, and forecast coverage within target in simulation.
 
 ## Phase 5: Human pilot
+
+**Done early (2026-10-12):** the calibration tools are built: `new --calibrate`, a minimal `play`, `calibrate`, and `bench --judge-profile`. The first real calibration session comes next, before Phase 2.
 
 - Rank three real lists: travel (about 20 items), products (about 10) and restaurants (about 15).
 - Replace the timing guesses with measured times, and rerun the Phase 3 comparison.

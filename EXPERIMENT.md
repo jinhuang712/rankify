@@ -135,9 +135,39 @@ Run these in order before the full grid. If one fails, fix the cause before goin
 
 Before the full grid runs, we commit the targets in [GOALS.md](GOALS.md), the grid and methods above, and the analysis: paired differences in seconds-to-target, reported as medians with bootstrap 95% intervals. Any result we didn't plan for is reported as exploratory, not as a win.
 
-## Part 2: Human pilot
+## Part 2: Calibration and pilot
 
-Simulation can't tell us how long people really take, how consistent they are, or whether the result feels right. So we run real sessions on three lists: about 20 places to travel to, about 10 products to buy, and about 15 restaurants from the last month.
+Simulation can't tell us how long people really take, how consistent they are, or whether the result feels right. Two kinds of real session answer that.
+
+### Calibration session
+
+One person ranks one real list of about 15 items with `rankify play`, on a list made with `--calibrate`. About 15% of rounds repeat an earlier pair with the sides swapped. `rankify calibrate` then fits the benchmark's human judge to the answers. It converts our fitted scores to the judge's normal-noise units, and estimates each setting by maximum likelihood or least squares.
+
+The direct estimates are biased. The gap between two items is itself estimated, and that noise weakens every relationship measured against it (the errors-in-variables problem; Fuller 1987). A parametric bootstrap corrects this (Efron & Tibshirani 1993): it simulates sessions like the person's own, measures the estimator's bias on them, and subtracts it. The correction is applied only where a recovery check showed that it helps: tie settings, close-call timing and list difficulty.
+
+**Recovery check (2026-10-12).** A simulated judge with known settings answered six sessions of 120 answers and six of 400. These are the medians recovered:
+
+| Setting | True | 120 answers | 400 answers |
+|---|---|---|---|
+| Answer time, easy pairs | 2.0 s | 1.9 s | 2.0 s |
+| List difficulty (spread) | 1.5 | 1.44 (0.6–2.6) | 1.28 (0.8–3.8) |
+| "Can't decide" peak | 30% | 17% | 29% |
+| Close-call time width | 0.6 | not recovered | 0.64 |
+| Fatigue per round | 0.3% | not recovered | 0.2% |
+| Lean toward the first item | 0.15 | not recovered | not recovered |
+| Random slips | 3% | not recovered | not recovered |
+
+So a profile says which settings it measured, and the benchmark uses only those:
+
+- About 60 answers measure answer time on easy pairs, list difficulty and the "can't decide" rate.
+- About 300 answers add close-call timing, tie width and fatigue.
+- The lean toward the first item and random slips keep the guesses at any length we tested.
+
+Several sittings on the same list add up.
+
+### Pilot
+
+The pilot runs real sessions on three lists: about 20 places to travel to, about 10 products to buy, and about 15 restaurants from the last month.
 
 During those sessions we record:
 

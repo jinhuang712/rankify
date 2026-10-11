@@ -2,6 +2,7 @@
 
 import re
 import secrets
+from collections import Counter
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass
 from datetime import datetime
@@ -21,6 +22,7 @@ from rankify.engine.baselines import (
     openskill_ratings,
     trueskill_ratings,
 )
+from rankify.engine.calibration import JudgeProfile, estimate_profile
 from rankify.engine.fit import fit_pairs, initial_x
 from rankify.engine.model import A_WINS, B_WINS, TIE, Pairs, Prior
 from rankify.engine.planner import PLANNER_NAME, derive_seed, random_pair
@@ -51,6 +53,8 @@ _RATED = {
     "openskill": openskill_ratings,
 }
 ARENA_SIGMA = 10.0  # Chatbot Arena fits Bradley-Terry with almost no prior
+CALIBRATION_REPEATS = 0.15  # share of calibration rounds that repeat an earlier pair
+_REPEAT_GAP = 8  # never repeat one of the last few pairs, so the judge can't just remember it
 _SLUG = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
 
 
@@ -141,7 +145,10 @@ class Rankify:
         mode: str = "stable",
         method: str = "rankify",
         seed: int | None = None,
+        calibrate: bool = False,
     ) -> None:
+        """Make a list. ``calibrate`` mixes in repeats of earlier pairs, with the sides swapped,
+        so ``calibrate()`` can measure how consistent the judge is."""
         if not _SLUG.match(slug):
             raise RankifyError(
                 "a list name uses lowercase letters, digits and dashes, like 'nba-goat'"
@@ -159,6 +166,10 @@ class Rankify:
             "seed": secrets.randbits(62) if seed is None else int(seed),
             "prior": asdict(Prior(sigma=ARENA_SIGMA) if method == "arena" else Prior()),
         }
+        if calibrate:
+            if method != "rankify":
+                raise RankifyError("calibration lists use the rankify method")
+            settings["repeat_share"] = CALIBRATION_REPEATS
         with Transaction(self.conn):
             list_id = store.insert_list(self.conn, slug, title, settings)
             for name in names:
@@ -239,8 +250,12 @@ class Rankify:
         *,
         cant_decide: bool = False,
         round_seq: int | None = None,
+        ms: int | None = None,
     ) -> RoundView:
-        """Answer the open round. ``numbers`` are as shown, best first."""
+        """Answer the open round. ``numbers`` are as shown, best first.
+
+        ``ms`` is the answer time measured by an interactive front end. Without it, the time
+        runs from when the question was issued, which includes any typing."""
         lst = self._list(slug)
         with Transaction(self.conn):
             judge = store.judge_id(self.conn, self.judge)
@@ -255,12 +270,14 @@ class Rankify:
                 outcome, answer = "cant_decide", None
             else:
                 outcome, answer = "answered", _order_from_numbers(numbers or [], query.shown)
-            ms = int(
-                (
-                    datetime.fromisoformat(store.now()) - datetime.fromisoformat(query.issued_at)
-                ).total_seconds()
-                * 1000
-            )
+            if ms is None:
+                ms = int(
+                    (
+                        datetime.fromisoformat(store.now())
+                        - datetime.fromisoformat(query.issued_at)
+                    ).total_seconds()
+                    * 1000
+                )
             store.insert_round(
                 self.conn,
                 lst.id,
@@ -347,6 +364,28 @@ class Rankify:
             tie_weight=fit.params.get("tie_weight"),
         )
 
+    def calibrate(self, slug: str) -> JudgeProfile:
+        """Estimate how this judge answers, from their rounds on one list."""
+        lst = self._list(slug)
+        judge = store.judge_id(self.conn, self.judge)
+        ids = [it.id for it in store.items(self.conn, lst.id)]
+        pos = {iid: k for k, iid in enumerate(ids)}
+        a, b, y, seconds = [], [], [], []
+        for r in store.effective_rounds(self.conn, lst.id):
+            if r.kind != "pair" or r.judge_id != judge:
+                continue
+            first, second = r.shown
+            a.append(pos[first])
+            b.append(pos[second])
+            if r.outcome == "cant_decide":
+                y.append(TIE)
+            else:
+                y.append(A_WINS if r.answer[0] == first else B_WINS)
+            seconds.append(None if r.ms is None else r.ms / 1000.0)
+        if len(y) < 20:
+            raise RankifyError(f"need at least 20 answers from '{self.judge}' to calibrate")
+        return estimate_profile(len(ids), a, b, y, seconds)
+
     def verify(self, slug: str) -> list[str]:
         """Rebuild the latest fit from the answer log alone and compare. Returns problems found."""
         lst = self._list(slug)
@@ -430,11 +469,33 @@ class Rankify:
             out.append((pos[first], pos[second], y))
         return out
 
+    def _calibration_repeat(
+        self, lst: store.ListRow, active: list[int], seed: int
+    ) -> tuple[int, int] | None:
+        """On calibration lists, sometimes re-ask an earlier pair with the sides swapped."""
+        share = lst.settings.get("repeat_share", 0.0)
+        rng = np.random.default_rng([seed, 7])
+        if not share or rng.random() >= share:
+            return None
+        live = set(active)
+        rounds = [
+            r
+            for r in store.effective_rounds(self.conn, lst.id)
+            if r.kind == "pair" and set(r.shown) <= live
+        ]
+        asked = Counter(frozenset(r.shown) for r in rounds)
+        pool = [r for r in rounds[:-_REPEAT_GAP] if asked[frozenset(r.shown)] == 1]
+        if len(rounds) <= _REPEAT_GAP or not pool:
+            return None
+        first, second = pool[int(rng.integers(len(pool)))].shown
+        return second, first
+
     def _plan(self, lst: store.ListRow, active: list[int], seed: int) -> tuple[int, int] | None:
         """The next pair of item ids, or None when the method has nothing left to ask."""
         method = _method(lst)
         if method in _RANDOM_PAIRS:
-            return random_pair(np.array(active), seed)
+            repeat = self._calibration_repeat(lst, active, seed)
+            return repeat or random_pair(np.array(active), seed)
         ids = [it.id for it in store.items(self.conn, lst.id)]
         pos = {iid: k for k, iid in enumerate(ids)}
         history = self._history(lst, pos)

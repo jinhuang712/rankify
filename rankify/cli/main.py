@@ -68,11 +68,21 @@ def new(
         ),
     ] = "rankify",
     seed: Annotated[int | None, typer.Option("--seed", help="Fix the random seed.")] = None,
+    calibrate: Annotated[
+        bool,
+        typer.Option(
+            "--calibrate",
+            help="Repeat some earlier pairs, sides swapped, so `rankify calibrate` can measure "
+            "how you answer.",
+        ),
+    ] = False,
 ) -> None:
     """Make a new list."""
     names = items.read_text(encoding="utf-8").splitlines() if items else []
     try:
-        _service(ctx).create_list(slug, title, names, mode=mode, method=method, seed=seed)
+        _service(ctx).create_list(
+            slug, title, names, mode=mode, method=method, seed=seed, calibrate=calibrate
+        )
     except RankifyError as e:
         _fail(str(e))
     count = len([n for n in names if n.strip()])
@@ -295,9 +305,17 @@ def bench(
     report: Annotated[
         Path | None, typer.Option("--report", help="Also write the report to this file.")
     ] = None,
+    judge_profile: Annotated[
+        Path | None,
+        typer.Option(
+            "--judge-profile", help="Human judge settings from `rankify calibrate --out`."
+        ),
+    ] = None,
 ) -> None:
     """Benchmark rankify against rating systems, through this CLI, on hidden scores."""
-    from rankify.bench import run_bench
+    from rankify.bench import load_profile, run_bench
+
+    profile = load_profile(judge_profile) if judge_profile else None
 
     def progress(done: int, total: int) -> None:
         if done == total or done % max(1, total // 20) == 0:
@@ -311,11 +329,132 @@ def bench(
         budget_per_item=budget,
         workers=workers,
         progress=progress,
+        profile=profile,
     )
     if report:
         report.parent.mkdir(parents=True, exist_ok=True)
         report.write_text(text, encoding="utf-8")
     typer.echo(text)
+
+
+# ---------------------------------------------------------------- interactive play
+
+
+PLAY_KEYS = "[1] or [2] pick   [t] can't decide   [u] undo   [q] quit"
+
+
+@app.command()
+def play(
+    ctx: typer.Context,
+    slug: Slug,
+    rounds: Annotated[
+        int | None, typer.Option("--rounds", help="Stop after this many answers.")
+    ] = None,
+    judge: JudgeOpt = "me",
+) -> None:
+    """Answer rounds with single keypresses. Times each answer from question to key.
+
+    A minimal stand-in until the full terminal UI (Phase 4).
+    """
+    import time
+
+    rk = _service(ctx, judge)
+    answered = 0
+    typer.echo(f"{PLAY_KEYS}\n")
+    while rounds is None or answered < rounds:
+        try:
+            view = rk.next_round(slug)
+        except NothingToAsk as e:
+            typer.echo(str(e))
+            break
+        except RankifyError as e:
+            _fail(str(e))
+        left = f" · {rounds - answered} to go" if rounds else ""
+        typer.echo(f"Round {view.round}{left} · {view.prompt}")
+        for item in view.items:
+            typer.echo(f"  {item.n}  {item.name}")
+        shown = time.perf_counter()
+        while True:
+            key = typer.getchar().lower()
+            if key in ("1", "2", "t", "u", "q"):
+                break
+        ms = int((time.perf_counter() - shown) * 1000)
+        if key == "q":
+            break
+        if key == "u":
+            try:
+                rk.undo(slug)
+                answered = max(0, answered - 1)
+                typer.echo("  undone\n")
+            except RankifyError as e:
+                typer.echo(f"  {e}\n")
+            continue
+        if key == "t":
+            rk.answer(slug, cant_decide=True, round_seq=view.round, ms=ms)
+            typer.echo("  can't decide\n")
+        else:
+            rk.answer(slug, [int(key)], round_seq=view.round, ms=ms)
+            typer.echo(f"  {view.items[int(key) - 1].name}\n")
+        answered += 1
+    typer.echo(
+        f"{answered} answer{'s' if answered != 1 else ''} this session. "
+        f"See the ranking with: rankify show {slug}"
+    )
+
+
+@app.command()
+def calibrate(
+    ctx: typer.Context,
+    slug: Slug,
+    out: Annotated[
+        Path | None, typer.Option("--out", help="Write the judge profile (JSON) to this file.")
+    ] = None,
+    as_json: JsonOpt = False,
+    judge: JudgeOpt = "me",
+) -> None:
+    """Estimate how you answer, from your rounds on a list, for the benchmark's human judge."""
+    from datetime import date
+
+    try:
+        profile = _service(ctx, judge).calibrate(slug)
+    except RankifyError as e:
+        _fail(str(e))
+    data = {"list": slug, "judge": judge, "date": date.today().isoformat(), **profile.as_dict()}
+    if out:
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    if as_json:
+        _emit_json(data)
+        return
+    p = profile
+    dis = (
+        "no repeated pairs"
+        if p.repeat_disagreement is None
+        else f"{p.repeat_disagreement:.0%} of {p.repeats} repeated pairs got a different answer "
+        f"(the fit expects {p.repeat_disagreement_expected:.0%})"
+    )
+    used = set(p.measured)
+
+    def tag(*keys: str) -> str:
+        return "measured" if all(k in used for k in keys) else "shown only; keeps the guess"
+
+    rows = [
+        ("Neighbours told apart", f"{p.neighbour_accuracy:.0%} of the time", tag("score_spread")),
+        ("Consistency", dis, "a check, not a setting"),
+        ("Lean toward first item", f"{p.first_bonus:+.2f} (0 = none)", tag("first_bonus")),
+        ("Random slips", f"{p.lapse:.0%} of answers", tag("lapse")),
+        ("Can't decide", f"up to {p.tie_peak:.0%} on near-ties", tag("tie_peak")),
+        ("Answer time, easy pairs", f"{p.base_seconds:.1f} s", tag("base_seconds")),
+        ("Extra on close calls", f"+{p.close_seconds:.1f} s", tag("close_seconds")),
+        ("Fatigue", f"noise +{p.fatigue:.1%} per round", tag("fatigue")),
+    ]
+    typer.echo(f"Judge profile for '{judge}' from {p.answers} answers on {p.items} items:\n")
+    for label, value, status in rows:
+        typer.echo(f"  {label:<24} {value:<46} ({status})")
+    for note in p.notes:
+        typer.echo(f"\n  note: {note}")
+    if out:
+        typer.echo(f"\nSaved to {out}. Use it with: rankify bench --judge-profile {out}")
 
 
 if __name__ == "__main__":

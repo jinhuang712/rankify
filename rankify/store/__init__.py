@@ -258,6 +258,7 @@ class RoundRow:
     answer: list[int] | None
     outcome: str
     undoes: int | None
+    ms: int | None = None  # time from question to answer
 
 
 def insert_query(conn, list_id, judge, seq, kind, shown, seed, planner, engine_version) -> QueryRow:
@@ -343,6 +344,7 @@ def effective_rounds(conn, list_id: int) -> list[RoundRow]:
             None if r["answer"] is None else json.loads(r["answer"]),
             r["outcome"],
             r["undoes"],
+            r["ms"],
         )
         for r in rows
     ]

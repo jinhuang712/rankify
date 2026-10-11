@@ -96,6 +96,11 @@ The books, papers and software that rankify builds on or measures itself against
 - Moyer, R. S. & Landauer, T. K. (1967). Time required for judgements of numerical inequality. *Nature*. The distance effect: close calls take longer.
 - Wichmann, F. A. & Hill, N. J. (2001). The psychometric function: I. Fitting, sampling, and goodness of fit. *Perception & Psychophysics*. Lapses, the occasional answer given at random.
 
+### Calibrating the human judge
+
+- Efron, B. & Tibshirani, R. J. (1993). *An Introduction to the Bootstrap*. Chapman & Hall. The parametric bootstrap bias correction used by `rankify calibrate`.
+- Fuller, W. A. (1987). *Measurement Error Models*. Wiley. Errors in variables: why noisy estimated gaps weaken the relationships measured against them.
+
 ### Software
 
 - † [choix](https://pypi.org/project/choix/) (Maystre): Bradley–Terry and Plackett–Luce fits. Our reference in tests.
