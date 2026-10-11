@@ -208,3 +208,19 @@ Results go in `experiments/`, one report per run, linked from here.
   - About 90% of questions in every random-pair method were already answered by earlier answers.
   - With the human judge, Confidence is calibrated (error 0.017–0.032), and Could be is slightly too wide (96–98%). The earlier "too cautious" result came from the unrealistic judges.
   - Insertion sort collapses with a human judge.
+- [2026-10-12: Phase 2 planner, v1](experiments/2026-10-12-phase2-planner-v1.md): order information, learned prior width, and stopping rules.
+  - With the perfect judge, rankify is far ahead. On 20 items it reached Quick in 29 rounds (Elo 191, Glicko-2 89) and Exact in 80 (Elo never). When it stopped, its target held in 59 of 60 lists.
+  - With the human judge, it stopped too early. On 10 items it reached Quick in 34 rounds, 57% of Elo's time, but in only 12 of 20 lists. On 20 items it got the top 3 right in only 5 of 20.
+  - A diagnosis on 10 lists found the cause. On crowded lists the learned width collapsed, the model decided everything was nearly tied, and a one-answer "worth asking" test stopped the session. In one list, the clearly best item lost its first comparison to a slip and was never asked about again.
+- **Tuning between v1 and v2** (seeds 30000+, which the benchmark never uses; 10 lists per setting, human judge). After adding first looks and the Could be check, we compared the floors 0.05, 0.1 and 0.2 bits over the next 8 answers.
+  - 0.1 was the best balance. On 20-item Quick it reached the target in 10 of 10 lists, in 25% of Elo's time, and was right at every stop. On 10-item Stable it took 71% of Elo's time.
+  - 0.2 stopped far too early. 0.05 ran much longer for little gain.
+  - On 10-item Quick, rankify needed 130% of Elo's time on these lists. With only 45 pairs, random pairs cover a short list quickly.
+- [2026-10-12: Phase 2 planner, v2](experiments/2026-10-12-phase2-planner-v2.md): first looks, the Could be check, and the 8-answer floor. 880 runs, none failed.
+  - **20 items, human judge, Quick:** 69 rounds (3.1 min). Elo needed 315 (13.3 min) and Just Sort It 141. That is 23% of Elo's time (G1 met) and 52% of Just Sort It's (G2 met). rankify reached the target in 11 of 20 lists, Elo in 12.
+  - **10 items, human judge:** Quick took 39 rounds (66% of Elo's time, 76% of Just Sort It's) and Stable took 73 (67% of Elo's, 95% of Just Sort It's). G1 is not met on 10 items. G2 is met for Quick but not for Stable. rankify is the only method to reach Exact in most 10-item lists (11 of 20).
+  - **20 items, Stable and Exact:** no method reached them in most lists.
+  - **Stopping:** when rankify stopped, its target held in 14 of 20 lists for both Quick and Stable on 10 items, but only 9 of 20 for Quick on 20 items. On crowded lists it stops with "nothing worth asking" while near-ties at #3–#4 that a person gets right 55–60% of the time remain unresolved.
+  - **Perfect judge:** 20 items took 40, 68 and 81 rounds to Quick, Stable and Exact. Elo took 191, 374 and never. rankify was right at every stop (60 of 60).
+  - **Calibration:** error 0.038–0.049 (G5 met). Could be covered 90–98% with the human judge (G6 met on 20 items, slightly too wide on 10).
+  - **Same answers in a different order:** rankify's #1 never changed (0 of 80). Elo's changed in 9 of 80.

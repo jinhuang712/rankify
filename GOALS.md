@@ -4,7 +4,9 @@ Each goal has a measure and a target. The targets are our starting proposal. We 
 
 ## Speed
 
-**G1. Faster than Elo.** For 20 items and a judge of normal consistency, reaching the Stable target takes at most a third of the simulated time that Elo with random pairs needs for the same accuracy.
+**G1. Faster than Elo.** With the benchmark's human judge, reaching the Quick and Stable targets takes at most half the time that Elo with random pairs needs for the same accuracy.
+
+*Changed 2026-10-12, before the Phase 2 benchmark ran:* the target was "at most a third, Stable, 20 items". After the first calibration session showed how few questions a person will answer, we chose a target that is realistic but still clearly better than Elo, over a stricter one.
 
 **G2. Faster than the strong baseline.** Reaching each mode's target takes at least 20% less simulated time than Just Sort It. If we can't manage that, we use Just Sort It's way of picking questions.
 

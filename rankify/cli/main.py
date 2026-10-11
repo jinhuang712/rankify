@@ -157,11 +157,22 @@ def _round_json(view: RoundView) -> dict:
     }
 
 
+ModeOpt = Annotated[
+    str | None, typer.Option("--mode", help="quick, stable or exact, for this session only.")
+]
+
+
 @app.command("next")
-def next_(ctx: typer.Context, slug: Slug, as_json: JsonOpt = False, judge: JudgeOpt = "me") -> None:
+def next_(
+    ctx: typer.Context,
+    slug: Slug,
+    as_json: JsonOpt = False,
+    judge: JudgeOpt = "me",
+    mode: ModeOpt = None,
+) -> None:
     """Show the open round, or start a new one. Exits with code 3 when nothing is left to ask."""
     try:
-        view = _service(ctx, judge).next_round(slug)
+        view = _service(ctx, judge).next_round(slug, mode=mode)
     except NothingToAsk as e:
         typer.echo(str(e), err=True)
         raise typer.Exit(EXIT_NOTHING_TO_ASK) from None
@@ -188,10 +199,16 @@ def answer(
     ] = None,
     as_json: JsonOpt = False,
     judge: JudgeOpt = "me",
+    ms: Annotated[
+        int | None,
+        typer.Option("--ms", hidden=True, help="Answer time measured by the caller, in ms."),
+    ] = None,
 ) -> None:
     """Answer the open round."""
     try:
-        view = _service(ctx, judge).answer(slug, numbers, cant_decide=cant_decide, round_seq=round_)
+        view = _service(ctx, judge).answer(
+            slug, numbers, cant_decide=cant_decide, round_seq=round_, ms=ms
+        )
     except RankifyError as e:
         _fail(str(e))
     if as_json:
@@ -224,7 +241,8 @@ def _ranking_json(view: RankingView) -> dict:
         "mode": view.mode,
         "method": view.method,
         "answers": view.answers,
-        "target_reached": None,  # stopping rules arrive in Phase 2
+        "target_reached": view.target_reached,
+        "sigma": None if view.sigma is None else round(view.sigma, 3),
         "position_bias": None if view.position_bias is None else round(view.position_bias, 1),
         "items": [
             {
@@ -243,7 +261,8 @@ def _ranking_json(view: RankingView) -> dict:
 def _print_ranking(view: RankingView) -> None:
     plural = "" if view.answers == 1 else "s"
     method = "" if view.method == "rankify" else f" · method {view.method}"
-    typer.echo(f"{view.title} · {view.mode}{method} · {view.answers} answer{plural}\n")
+    status = {True: " · target reached", False: " · not there yet"}.get(view.target_reached, "")
+    typer.echo(f"{view.title} · {view.mode}{method} · {view.answers} answer{plural}{status}\n")
     if not view.items:
         typer.echo("No items yet.")
         return
@@ -287,6 +306,39 @@ def verify(ctx: typer.Context, slug: Slug) -> None:
 
 
 @app.command()
+def why(
+    ctx: typer.Context,
+    slug: Slug,
+    round_: Annotated[int, typer.Option("--round", help="The round to explain.")],
+    as_json: JsonOpt = False,
+) -> None:
+    """Why rankify asked a round: what it expected to learn, and what else it considered."""
+    try:
+        view = _service(ctx).why(slug, round_)
+    except RankifyError as e:
+        _fail(str(e))
+    if as_json:
+        _emit_json(view.__dict__)
+        return
+    typer.echo(f"Round {view.round} · mode {view.mode} · {view.in_play} items still matter")
+    t = view.timing
+    pace = f"{t['base']:.1f} s per answer" + (
+        f", +{t['close']:.1f} s on close calls" if t["close"] else ""
+    )
+    typer.echo(f"Expected answer time: {pace} (from {t['samples']} of your timed answers)\n")
+    if view.chosen is None:
+        typer.echo(f"Stopped: {view.reason}.")
+    typer.echo(f"  {'Pair':<44} {'Learns':>8} {'Time':>6}  {'P(first better)':>15}")
+    for k, c in enumerate(view.candidates):
+        mark = "→" if k == 0 and view.chosen is not None else " "
+        pair = f"{c['first_name']} vs {c['second_name']}"
+        typer.echo(
+            f"{mark} {pair:<44} {c['gain']:>6.3f} b {c['seconds']:>5.1f}s  {c['confidence']:>15.0%}"
+        )
+    typer.echo("\nLearns: expected bits about the order of the pair that matter for the mode.")
+
+
+@app.command()
 def bench(
     items: Annotated[str, typer.Option("--items", help="List sizes, comma-separated.")] = "10,20",
     judges: Annotated[
@@ -311,6 +363,14 @@ def bench(
             "--judge-profile", help="Human judge settings from `rankify calibrate --out`."
         ),
     ] = None,
+    cache: Annotated[
+        Path | None,
+        typer.Option(
+            "--cache",
+            help="Save each finished run here and skip runs already saved, so an interrupted "
+            "benchmark resumes. Reuse only with the same code.",
+        ),
+    ] = None,
 ) -> None:
     """Benchmark rankify against rating systems, through this CLI, on hidden scores."""
     from rankify.bench import load_profile, run_bench
@@ -330,6 +390,7 @@ def bench(
         workers=workers,
         progress=progress,
         profile=profile,
+        cache=cache,
     )
     if report:
         report.parent.mkdir(parents=True, exist_ok=True)
@@ -351,9 +412,11 @@ def play(
         int | None, typer.Option("--rounds", help="Stop after this many answers.")
     ] = None,
     judge: JudgeOpt = "me",
+    mode: ModeOpt = None,
 ) -> None:
     """Answer rounds with single keypresses. Times each answer from question to key.
 
+    Stops by itself when the mode's target is reached or nothing is worth asking.
     A minimal stand-in until the full terminal UI (Phase 4).
     """
     import time
@@ -363,13 +426,13 @@ def play(
     typer.echo(f"{PLAY_KEYS}\n")
     while rounds is None or answered < rounds:
         try:
-            view = rk.next_round(slug)
+            view = rk.next_round(slug, mode=mode)
         except NothingToAsk as e:
             typer.echo(str(e))
             break
         except RankifyError as e:
             _fail(str(e))
-        left = f" · {rounds - answered} to go" if rounds else ""
+        left = f" · {answered} answered" if answered else ""
         typer.echo(f"Round {view.round}{left} · {view.prompt}")
         for item in view.items:
             typer.echo(f"  {item.n}  {item.name}")

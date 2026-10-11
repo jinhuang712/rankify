@@ -2,7 +2,7 @@
 
 Rank anything by answering a few quick questions, with real statistics behind every answer.
 
-> **Status: Phase 1 done.** Pair rounds work end to end from the CLI: make a list, answer rounds, see the ranking with Score, Confidence and Could be. Rounds are still random pairs. The planner that picks decisive rounds is Phase 2 (see [ROADMAP.md](ROADMAP.md)).
+> **Status: Phase 2 done.** rankify picks each pair by how much it teaches about the order you care about. It stops when your mode's confidence target is reached or nothing is left worth asking, and `rankify why` explains any question. Against a simulated human judge on 20 items, it reaches the right top 3 in about a quarter of Elo's time. Questions about 3–5 items come in Phase 3 (see [ROADMAP.md](ROADMAP.md) and [EXPERIMENT.md](EXPERIMENT.md#results)).
 
 ## Try it
 
@@ -86,7 +86,7 @@ The books, papers and software that rankify builds on or measures itself against
 ### Choosing questions and sorting
 
 - Ford, L. R. & Johnson, S. M. (1959). A tournament problem. *American Mathematical Monthly*. Merge insertion, which gets close to the fewest comparisons a sort can use.
-- † Houlsby, N., Huszár, F., Ghahramani, Z. & Lengyel, M. (2011). [Bayesian active learning for classification and preference learning](https://arxiv.org/abs/1112.5745). BALD, the rule rankify's planner will use to pick questions.
+- † Houlsby, N., Huszár, F., Ghahramani, Z. & Lengyel, M. (2011). [Bayesian active learning for classification and preference learning](https://arxiv.org/abs/1112.5745). BALD. rankify's planner uses the same idea, aimed at the order of each pair rather than the scores.
 - † Maystre, L. & Grossglauser, M. (2017). [Just sort it! A simple and effective approach to active preference learning](https://proceedings.mlr.press/v70/maystre17a.html). *ICML*. Repeated quicksort; the strong reference baseline.
 - † Saha, A. & Gopalan, A. (2019). [Active ranking with subset-wise preferences](https://arxiv.org/abs/1810.10321). *AISTATS*. Finds that "pick the best" is no faster than pairs, while ordering m items is up to m times faster.
 - Chen, X., Bennett, P. N., Collins-Thompson, K. & Horvitz, E. (2013). Pairwise ranking aggregation in a crowdsourced setting. *WSDM*. Crowd-BT, which weighs judges by reliability. Relevant once many people rank one list.
@@ -100,6 +100,12 @@ The books, papers and software that rankify builds on or measures itself against
 
 - Efron, B. & Tibshirani, R. J. (1993). *An Introduction to the Bootstrap*. Chapman & Hall. The parametric bootstrap bias correction used by `rankify calibrate`.
 - Fuller, W. A. (1987). *Measurement Error Models*. Wiley. Errors in variables: why noisy estimated gaps weaken the relationships measured against them.
+
+### Learning how much an answer counts
+
+- MacKay, D. J. C. (1992). Bayesian interpolation. *Neural Computation*. The evidence framework: rankify learns its prior width by maximizing the evidence.
+- Dempster, A. P., Laird, N. M. & Rubin, D. B. (1977). Maximum likelihood from incomplete data via the EM algorithm. *Journal of the Royal Statistical Society, Series B*. The algorithm that finds that width.
+- Aitken, A. C. (1926). On Bernoulli's numerical solution of algebraic equations. *Proceedings of the Royal Society of Edinburgh*. Aitken's acceleration, which speeds up the EM steps.
 
 ### Software
 

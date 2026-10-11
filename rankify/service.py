@@ -11,7 +11,7 @@ from time import perf_counter
 import numpy as np
 
 from rankify import store
-from rankify.engine import ENGINE_VERSION
+from rankify.engine import ENGINE_VERSION, stop
 from rankify.engine.baselines import (
     History,
     elo_close_pair,
@@ -23,9 +23,9 @@ from rankify.engine.baselines import (
     trueskill_ratings,
 )
 from rankify.engine.calibration import JudgeProfile, estimate_profile
-from rankify.engine.fit import fit_pairs, initial_x
+from rankify.engine.fit import fit_pairs, fit_pairs_learning_sigma, initial_x
 from rankify.engine.model import A_WINS, B_WINS, TIE, Pairs, Prior
-from rankify.engine.planner import PLANNER_NAME, derive_seed, random_pair
+from rankify.engine.planner import PLANNER_NAME, Timing, derive_seed, plan_pair, random_pair
 from rankify.engine.stats import SCORE_SCALE, summarize
 from rankify.store import Transaction
 
@@ -46,7 +46,8 @@ METHODS = (
     "insertion-sort",
 )
 _FITTED = ("rankify", "arena", "just-sort-it")  # ranking comes from our Bradley-Terry fit
-_RANDOM_PAIRS = ("rankify", "elo", "glicko2", "trueskill", "openskill", "arena")
+_LEARNS_SIGMA = ("rankify", "just-sort-it")  # learn the prior width; arena keeps a flat prior
+_RANDOM_PAIRS = ("elo", "glicko2", "trueskill", "openskill", "arena")
 _RATED = {
     "glicko2": glicko2_ratings,
     "trueskill": trueskill_ratings,
@@ -102,6 +103,8 @@ class RankingView:
     items: list[RankedItem]
     position_bias: float | None  # fitted first-slot bonus, in Score points
     tie_weight: float | None  # Davidson nu
+    target_reached: bool | None = None  # None for methods without Confidence
+    sigma: float | None = None  # learned prior width
 
     def as_dict(self) -> dict:
         return asdict(self)
@@ -127,6 +130,21 @@ class Refit:
     upto_round_id: int | None
     n_answers: int
     ms: float
+    theta: np.ndarray | None = None  # scores and covariance, for methods that have them
+    theta_cov: np.ndarray | None = None
+    ranks: list[tuple[int, int, int]] | None = None  # (position, rank_lo, rank_hi), best first
+
+
+@dataclass(frozen=True)
+class WhyView:
+    list: str
+    round: int
+    mode: str
+    reason: str
+    in_play: int
+    chosen: dict | None
+    candidates: list[dict]
+    timing: dict
 
 
 class Rankify:
@@ -165,6 +183,7 @@ class Rankify:
             "method": method,
             "seed": secrets.randbits(62) if seed is None else int(seed),
             "prior": asdict(Prior(sigma=ARENA_SIGMA) if method == "arena" else Prior()),
+            "learn_sigma": method in _LEARNS_SIGMA,
         }
         if calibrate:
             if method != "rankify":
@@ -220,9 +239,13 @@ class Rankify:
 
     # ------------------------------------------------------------ rounds
 
-    def next_round(self, slug: str) -> RoundView:
-        """The open round, or a new one if none is open."""
+    def next_round(self, slug: str, mode: str | None = None) -> RoundView:
+        """The open round, or a new one if none is open. ``mode`` overrides the list's mode
+        for this question (rankify only)."""
         lst = self._list(slug)
+        mode = mode or lst.settings["mode"]
+        if mode not in MODES:
+            raise RankifyError(f"mode must be one of: {', '.join(MODES)}")
         with Transaction(self.conn):
             judge = store.judge_id(self.conn, self.judge)
             active = self._active_ids(lst)
@@ -232,15 +255,26 @@ class Rankify:
                     raise RankifyError(f"'{slug}' needs at least 2 items to rank")
                 seq = store.next_seq(self.conn, lst.id)
                 seed = derive_seed(lst.settings["seed"], seq)
-                pair = self._plan(lst, active, seed)
+                plan = None
+                if _method(lst) == "rankify" and lst.settings.get("repeat_share"):
+                    # Calibration lists keep the design the calibration was validated on:
+                    # random pairs, some repeated with the sides swapped.
+                    repeat = self._calibration_repeat(lst, active, seed)
+                    pair = repeat or random_pair(np.array(active), seed)
+                    planner = "calibration-repeat" if repeat else "calibration-random"
+                elif _method(lst) == "rankify":
+                    plan, pair = self._smart_plan(lst, judge, mode, seed)
+                    planner = PLANNER_NAME
+                else:
+                    pair, planner = self._plan(lst, active, seed), _method(lst)
                 if pair is None:
-                    raise NothingToAsk(
-                        f"nothing left to ask: the {_method(lst)} ranking of '{slug}' is final"
-                    )
-                planner = PLANNER_NAME if _method(lst) == "rankify" else _method(lst)
+                    why = plan["reason"] if plan else "the ranking is final"
+                    raise NothingToAsk(f"nothing left to ask for '{slug}' ({mode}): {why}")
                 query = store.insert_query(
                     self.conn, lst.id, judge, seq, "pair", list(pair), seed, planner, ENGINE_VERSION
                 )
+                if plan is not None:
+                    self._save_plan(query.id, mode, plan)
         return self._round_view(lst, query)
 
     def answer(
@@ -338,11 +372,13 @@ class Rankify:
     def ranking(self, slug: str) -> RankingView:
         lst = self._list(slug)
         fit = store.latest_fit(self.conn, lst.id)
-        if fit is None or fit.upto_round_id != store.last_round_id(self.conn, lst.id):
+        stale = fit is None or fit.upto_round_id != store.last_round_id(self.conn, lst.id)
+        if stale or fit.engine_version != ENGINE_VERSION:
             with Transaction(self.conn):
                 self._refit(lst)
             fit = store.latest_fit(self.conn, lst.id)
         names = {it.id: it.name for it in store.items(self.conn, lst.id)}
+        targets = fit.params.get("targets")
         return RankingView(
             list=lst.slug,
             title=lst.title,
@@ -362,6 +398,33 @@ class Rankify:
             ],
             position_bias=fit.params.get("bias_points"),
             tie_weight=fit.params.get("tie_weight"),
+            target_reached=None if targets is None else targets[lst.settings["mode"]],
+            sigma=fit.params.get("sigma"),
+        )
+
+    def why(self, slug: str, round_seq: int) -> WhyView:
+        """Why the planner asked a round: the candidates it weighed and what it expected."""
+        lst = self._list(slug)
+        plan = store.plan_for_round(self.conn, lst.id, round_seq)
+        if plan is None:
+            raise RankifyError(
+                f"round {round_seq} of '{slug}' has no saved plan (asked by another method, "
+                "a calibration repeat, an undo, or it doesn't exist)"
+            )
+        names = {it.id: it.name for it in store.items(self.conn, lst.id)}
+
+        def named(c: dict) -> dict:
+            return c | {"first_name": names[c["first"]], "second_name": names[c["second"]]}
+
+        return WhyView(
+            list=lst.slug,
+            round=plan["round"],
+            mode=plan["mode"],
+            reason=plan["reason"],
+            in_play=plan["in_play"],
+            chosen=None if plan["chosen"] is None else named(plan["chosen"]),
+            candidates=[named(c) for c in plan["candidates"]],
+            timing=plan["timing"],
         )
 
     def calibrate(self, slug: str) -> JudgeProfile:
@@ -392,6 +455,13 @@ class Rankify:
         stored = store.latest_fit(self.conn, lst.id)
         if stored is None:
             return ["no stored fit"]
+        if stored.engine_version != ENGINE_VERSION:
+            return [
+                (
+                    f"the stored fit was made by engine {stored.engine_version}, this is "
+                    f"{ENGINE_VERSION}; run `rankify show {slug}` to refit, then verify again"
+                )
+            ]
         problems = []
         last = store.last_round_id(self.conn, lst.id)
         if stored.upto_round_id != last:
@@ -494,8 +564,7 @@ class Rankify:
         """The next pair of item ids, or None when the method has nothing left to ask."""
         method = _method(lst)
         if method in _RANDOM_PAIRS:
-            repeat = self._calibration_repeat(lst, active, seed)
-            return repeat or random_pair(np.array(active), seed)
+            return random_pair(np.array(active), seed)
         ids = [it.id for it in store.items(self.conn, lst.id)]
         pos = {iid: k for k, iid in enumerate(ids)}
         history = self._history(lst, pos)
@@ -522,31 +591,32 @@ class Rankify:
         active = [k for k, it in enumerate(items) if it.removed_at is None]
         upto = store.last_round_id(self.conn, lst.id)
         x, iterations, params = None, 0, {}
+        theta = cov = ranks = None
 
         if method in _FITTED:
-            pairs = Pairs.of(*zip(*history)) if history else Pairs.of([], [], [])
+            pairs = Pairs.of(*zip(*history, strict=True)) if history else Pairs.of([], [], [])
             prior = Prior(**lst.settings["prior"])
             x0 = self._warm_start(lst, ids, prior) if warm else None
-            fit = fit_pairs(len(ids), pairs, prior, x0=x0)
-            stats = summarize(
-                fit.theta,
-                fit.theta_cov,
-                np.array(active, dtype=np.int64),
-                seed=derive_seed(lst.settings["seed"], upto or 0, 1),
-            )
-            rows = [
-                store.FitItemRow(
-                    ids[s.index], s.theta, s.sd, s.score, s.rank, s.rank_lo, s.rank_hi, s.confidence
-                )
-                for s in stats
-            ]
+            if lst.settings.get("learn_sigma", method in _LEARNS_SIGMA):
+                sigma0 = self._last_sigma(lst) if warm else None
+                fit = fit_pairs_learning_sigma(len(ids), pairs, prior, x0=x0, sigma0=sigma0)
+            else:
+                fit = fit_pairs(len(ids), pairs, prior, x0=x0)
+            theta, cov = fit.theta, fit.theta_cov
             x, iterations = fit.x, fit.iterations
-            params = {"bias_points": fit.bias * SCORE_SCALE, "tie_weight": fit.tie}
+            params = {
+                "bias_points": fit.bias * SCORE_SCALE,
+                "tie_weight": fit.tie,
+                "sigma": fit.sigma or prior.sigma,
+            }
         elif method in _RATED:
             theta, sd = _RATED[method](len(ids), history)
+            cov = np.diag(sd**2)
+
+        if theta is not None:
             stats = summarize(
                 theta,
-                np.diag(sd**2),
+                cov,
                 np.array(active, dtype=np.int64),
                 seed=derive_seed(lst.settings["seed"], upto or 0, 1),
             )
@@ -556,6 +626,9 @@ class Rankify:
                 )
                 for s in stats
             ]
+            ranks = [(s.index, s.rank_lo, s.rank_hi) for s in stats]
+            nb = stop.neighbours(theta, cov, [s.index for s in stats])
+            params["targets"] = {m: stop.target_reached(m, nb, ranks) for m in MODES}
         elif method in ("elo", "elo-close"):
             ratings = elo_ratings(len(ids), history)
             order = sorted(active, key=lambda k: (-ratings[k], k))
@@ -572,8 +645,71 @@ class Rankify:
             ]
             params = {"finished": state.next_pair is None, "unranked": len(state.unranked)}
         return Refit(
-            rows, params, iterations, x, ids, upto, len(history), (perf_counter() - t0) * 1000
+            rows,
+            params,
+            iterations,
+            x,
+            ids,
+            upto,
+            len(history),
+            (perf_counter() - t0) * 1000,
+            theta=theta,
+            theta_cov=cov,
+            ranks=ranks,
         )
+
+    def _smart_plan(
+        self, lst: store.ListRow, judge: int, mode: str, seed: int
+    ) -> tuple[dict, tuple[int, int] | None]:
+        """rankify's planner: the pair worth the most per second, or None to stop."""
+        r = self._compute(lst, warm=True)
+        timing = Timing.fit(store.timing_samples(self.conn, lst.id, judge))
+        ids = r.item_ids
+        looks: Counter = Counter()
+        for a, b, _ in self._history(lst, {iid: k for k, iid in enumerate(ids)}):
+            looks[a] += 1
+            looks[b] += 1
+        plan = plan_pair(mode, r.theta, r.theta_cov, r.ranks, timing, seed, looks)
+
+        def describe(c) -> dict:
+            return {
+                "first": ids[c.first],
+                "second": ids[c.second],
+                "gain": c.gain,
+                "seconds": c.seconds,
+                "value": c.value,
+                "confidence": c.confidence,
+                "closeness": c.closeness,
+            }
+
+        record = {
+            "reason": plan.reason,
+            "in_play": plan.in_play,
+            "chosen": None if plan.chosen is None else describe(plan.chosen),
+            "closeness": None if plan.chosen is None else plan.chosen.closeness,
+            "candidates": [describe(c) for c in plan.candidates],
+            "timing": {"base": timing.base, "close": timing.close, "samples": timing.samples},
+        }
+        if plan.chosen is None:
+            return record, None
+        return record, (ids[plan.chosen.first], ids[plan.chosen.second])
+
+    def _save_plan(self, query_id: int, mode: str, record: dict) -> None:
+        store.insert_plan(
+            self.conn,
+            query_id,
+            mode=mode,
+            reason=record["reason"],
+            in_play=record["in_play"],
+            closeness=record["closeness"],
+            chosen=record["chosen"],
+            candidates=record["candidates"],
+            timing=record["timing"],
+        )
+
+    def _last_sigma(self, lst: store.ListRow) -> float | None:
+        fit = store.latest_fit(self.conn, lst.id)
+        return None if fit is None else fit.params.get("sigma")
 
     def _refit(self, lst: store.ListRow) -> Refit:
         r = self._compute(lst, warm=True)

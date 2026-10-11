@@ -25,7 +25,7 @@ import sys
 import tempfile
 import time
 from concurrent.futures import ProcessPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from statistics import NormalDist
@@ -177,6 +177,7 @@ class RunResult:
     reorder_changed_top: bool | None = None
     reorder_tau: float | None = None
     ms: dict[str, list[float]] = field(default_factory=dict)
+    error: str | None = None  # set when the run crashed; left out of every statistic
 
     def reached(self, target: str) -> int | None:
         return first_confirmed(self.flags[target], self.finished)
@@ -230,7 +231,10 @@ def targets_met(order: list[str], theta: dict[str, float], margin: float = TIE_M
 def run_one(
     method: str, judge_kind: str, n: int, seed: int, budget: int, profile: dict | None = None
 ) -> RunResult:
+    """One hidden list, one method, through the CLI. ``method`` may name a mode, as in
+    ``rankify:quick``; rankify runs once per mode so each target is measured in its mode."""
     params, spread = _unpack(profile)
+    base_method, _, mode = method.partition(":")
     rng = np.random.default_rng(seed)
     names = [f"item-{k:02d}" for k in range(n)]
     theta = hidden_scores(names, rng, spread)
@@ -253,7 +257,9 @@ def run_one(
             "--items",
             str(items),
             "--method",
-            method,
+            base_method,
+            "--mode",
+            mode or "stable",
             "--seed",
             str(seed),
         )
@@ -273,11 +279,12 @@ def run_one(
             res.repeats.append(frozenset((a, b)) in seen)
             seen.add(frozenset((a, b)))
             res.implied.append(bool(known[a, b] or known[b, a]))
+            timed = ("--round", str(round_["round"]), "--ms", str(int(seconds * 1000)))
             if pick is None:
-                cli.ok("answer", "bench", "--cant-decide", "--round", str(round_["round"]))
+                cli.ok("answer", "bench", "--cant-decide", *timed)
                 log.append((a, b, 2))
             else:
-                cli.ok("answer", "bench", str(pick), "--round", str(round_["round"]))
+                cli.ok("answer", "bench", str(pick), *timed)
                 winner, loser = (a, b) if pick == 1 else (b, a)
                 log.append((a, b, 0 if pick == 1 else 1))
                 res.decided += 1
@@ -311,16 +318,16 @@ def run_one(
 
 def _reorder_check(res: RunResult, log, n, rng) -> None:
     """Replay the same answers in two other orders through the method's scoring."""
-    if res.method not in ("rankify", *ONLINE) or len(log) < 2:
+    if res.method not in ("rankify:exact", *ONLINE) or len(log) < 2:
         return
     from rankify.engine import baselines
-    from rankify.engine.fit import fit_pairs
+    from rankify.engine.fit import fit_pairs_learning_sigma
     from rankify.engine.model import Pairs
 
     def scores(order) -> np.ndarray:
         hist = [log[k] for k in order]
-        if res.method == "rankify":
-            return fit_pairs(n, Pairs.of(*zip(*hist, strict=True))).theta
+        if res.method == "rankify:exact":
+            return fit_pairs_learning_sigma(n, Pairs.of(*zip(*hist, strict=True))).theta
         if res.method == "elo":
             return baselines.elo_ratings(n, hist)
         return getattr(baselines, f"{res.method}_ratings")(n, hist)[0]
@@ -332,7 +339,12 @@ def _reorder_check(res: RunResult, log, n, rng) -> None:
 
 
 def _run_task(task):
-    return run_one(*task)
+    """One run; a crash is recorded, not raised, so one bad run can't sink the benchmark."""
+    try:
+        return run_one(*task)
+    except Exception as e:  # noqa: BLE001 - reported in full in the benchmark's report
+        method, judge_kind, n, seed = task[:4]
+        return RunResult(method, judge_kind, n, seed, error=f"{type(e).__name__}: {e}")
 
 
 def _lower_priority() -> None:
@@ -365,35 +377,74 @@ def run_bench(
     real_cli: bool = True,
     progress=None,
     profile: dict | None = None,
+    cache: Path | None = None,
 ) -> str:
-    """Run the benchmark. ``profile`` (from ``load_profile``) replaces the guessed human judge."""
+    """Run the benchmark. ``profile`` (from ``load_profile``) replaces the guessed human judge.
+
+    ``cache`` is a JSON-lines file of finished runs. Each run is appended as soon as it
+    finishes, and runs already in the file are not run again, so an interrupted benchmark
+    resumes where it stopped. Only reuse a cache with the same code.
+    """
+    runnable = [
+        variant
+        for m in methods
+        for variant in ([f"rankify:{t}" for t in TARGETS] if m == "rankify" else [m])
+    ]
     tasks = [
         (m, j, n, 1000 * n + s, budget_per_item * n, profile)
         for n in sizes
         for j in judges
         for s in range(runs)
-        for m in methods
+        for m in runnable
     ]
+    done = _load_cache(cache)
+    results: list[RunResult] = [done[t[:4]] for t in tasks if t[:4] in done]
+    todo = [t for t in tasks if t[:4] not in done]
     workers = max(1, min(workers, os.cpu_count() or 1))
     t0 = time.perf_counter()
-    results: list[RunResult] = []
+
+    def finished(res: RunResult) -> None:
+        results.append(res)
+        if cache is not None and not res.error:
+            with Path(cache).open("a", encoding="utf-8") as f:
+                f.write(json.dumps(asdict(res)) + "\n")
+        if progress:
+            progress(len(results), len(tasks))
+
     if workers == 1:
         _lower_priority()
-        for k, task in enumerate(tasks):
-            results.append(run_one(*task))
-            if progress:
-                progress(k + 1, len(tasks))
-    else:
+        for task in todo:
+            finished(_run_task(task))
+    elif todo:
         for var in _ONE_THREAD:  # read by numpy when each worker process starts
             os.environ.setdefault(var, "1")
         with ProcessPoolExecutor(max_workers=workers, initializer=_lower_priority) as pool:
-            for k, res in enumerate(pool.map(_run_task, tasks, chunksize=1)):
-                results.append(res)
-                if progress:
-                    progress(k + 1, len(tasks))
+            for res in pool.map(_run_task, todo, chunksize=1):
+                finished(res)
     elapsed = time.perf_counter() - t0
+    failed = [r for r in results if r.error]
+    results = [r for r in results if not r.error]
     real = _real_cli_sample() if real_cli else None
-    return _report(results, sizes, judges, methods, runs, budget_per_item, elapsed, real, profile)
+    text = _report(results, sizes, judges, methods, runs, budget_per_item, elapsed, real, profile)
+    if failed:
+        rows = [
+            f"- {r.method}, {r.judge} judge, {r.n} items, seed {r.seed}: {r.error}" for r in failed
+        ]
+        text += "\n## Failed runs (left out of every table)\n\n" + "\n".join(rows) + "\n"
+    return text
+
+
+def _load_cache(cache: Path | None) -> dict[tuple, RunResult]:
+    """Finished runs from a cache file, keyed by (method, judge, items, seed)."""
+    if cache is None or not Path(cache).exists():
+        return {}
+    done = {}
+    for line in Path(cache).read_text(encoding="utf-8").splitlines():
+        if line.strip():
+            res = RunResult(**json.loads(line))
+            res.calibration = [(float(c), bool(ok)) for c, ok in res.calibration]
+            done[(res.method, res.judge, res.n, res.seed)] = res
+    return done
 
 
 def _real_cli_sample(calls: int = 5) -> dict[str, float] | None:
@@ -446,17 +497,17 @@ def _git_commit() -> str:
 
 FEATURES = {
     "Chooses informative pairs": {
-        "rankify": "no: random pairs (planner is Phase 2)",
+        "rankify": "yes: order information per second, weighted by the mode",
         "elo-close": "yes: close ratings",
         "just-sort-it": "yes: quicksort",
         "insertion-sort": "yes: binary search",
     },
     "Knows when it is done": {
-        "rankify": "no (Phase 2)",
+        "rankify": "yes: confidence target, or nothing worth asking",
         "insertion-sort": "yes, but trusts every answer",
     },
     "Rounds left": {"rankify": "no (Phase 4)"},
-    "Precision modes": {"rankify": "no (Phase 2)"},
+    "Precision modes": {"rankify": "yes: quick, stable, exact"},
     "Pick / rank rounds": {"rankify": "no (Phase 3)"},
     "Confidence and Could be": {
         "rankify": "yes",
@@ -484,6 +535,14 @@ def _report(
     by: dict[tuple, list[RunResult]] = {}
     for r in results:
         by.setdefault((r.n, r.judge, r.method), []).append(r)
+    for (n, j, m), rs in list(by.items()):
+        if m == "rankify:exact":  # the longest rankify run stands for rankify in most tables
+            by[(n, j, "rankify")] = rs
+
+    def runs_for(n: int, j: str, m: str, target: str) -> list[RunResult]:
+        """rankify's result for a target comes from its run in that target's mode."""
+        return by[(n, j, f"rankify:{target}")] if m == "rankify" else by[(n, j, m)]
+
     p, spread = _unpack(profile)
     source = profile["label"] if profile else "all guesses until a real session calibrates them"
     lines = [
@@ -583,9 +642,9 @@ def _report(
                 "|---|---|---|---|",
             ]
             for m in methods:
-                rs = by[(n, j, m)]
                 cells = []
                 for t in TARGETS:
+                    rs = runs_for(n, j, m, t)
                     rounds = _median_or_none([r.reached(t) for r in rs])
                     mins = _median_or_none([r.minutes_to(t) for r in rs])
                     got = sum(r.reached(t) is not None for r in rs)
@@ -594,6 +653,8 @@ def _report(
                     else:
                         cells.append(f"{rounds:.0f} · {mins:.1f} min ({got}/{len(rs)})")
                 lines.append(f"| {method_label(m)} | " + " | ".join(cells) + " |")
+            if "rankify" in methods:
+                lines += _rankify_stops(by, n, j) + _ratios(runs_for, methods, n, j)
             checkpoints = [c for c in (10, 25, 50, 100, 200, 400) if c <= budget_per_item * n]
             lines += [
                 "",
@@ -663,13 +724,14 @@ def _report(
         "Each list's answers replayed in two shuffled orders through the method's scoring:",
         "",
     ]
-    for m in ("rankify", *ONLINE):
+    for m in ("rankify:exact", *ONLINE):
         rs = [r for r in results if r.method == m and r.reorder_changed_top is not None]
+        label = m.partition(":")[0]
         if rs:
             changed = sum(r.reorder_changed_top for r in rs)
             tau = statistics.median(r.reorder_tau for r in rs)
             lines.append(
-                f"- {m}: #1 changed in {changed}/{len(rs)} lists; median τ between the "
+                f"- {label}: #1 changed in {changed}/{len(rs)} lists; median τ between the "
                 f"two rankings {tau:.2f}"
             )
     lines.append("")
@@ -683,7 +745,7 @@ def _report(
         "|---|---|---|---|",
     ]
     for m in methods:
-        rs = [r for r in results if r.method == m]
+        rs = [r for r in results if r.method.partition(":")[0] == m]
         cells = []
         for call in ("next", "answer", "show"):
             vals = [v for r in rs for v in r.ms.get(call, [])]
@@ -735,6 +797,49 @@ def _report(
         "",
     ]
     return "\n".join(lines)
+
+
+def _rankify_stops(by, n: int, j: str) -> list[str]:
+    """When rankify said it was done, in each mode: how often, how soon, and was it right?"""
+    lines = [
+        "",
+        "When rankify stopped by itself, in each mode (median over lists that stopped):",
+        "",
+        "| Mode | Stopped by itself | Target really met at the stop | Rounds | Minutes |",
+        "|---|---|---|---|---|",
+    ]
+    for t in TARGETS:
+        rs = by[(n, j, f"rankify:{t}")]
+        stopped = [r for r in rs if r.finished and r.rounds]
+        met = sum(r.flags[t][-1] for r in stopped)
+        rounds = statistics.median(r.rounds for r in stopped) if stopped else None
+        mins = statistics.median(sum(r.seconds) / 60 for r in stopped) if stopped else None
+        lines.append(
+            f"| {t} | {len(stopped)}/{len(rs)} | {met}/{len(stopped)} | "
+            + ("—" if rounds is None else f"{rounds:.0f}")
+            + " | "
+            + ("—" if mins is None else f"{mins:.1f}")
+            + " |"
+        )
+    return lines
+
+
+def _ratios(runs_for, methods, n: int, j: str) -> list[str]:
+    """rankify's time to each target as a share of a baseline's (goals G1 and G2)."""
+    lines = []
+    for other, goal in (("elo", "G1: at most 50%"), ("just-sort-it", "G2: at most 80%")):
+        if other not in methods:
+            continue
+        parts = []
+        for t in ("quick", "stable", "exact"):
+            mine = _median_or_none([r.minutes_to(t) for r in runs_for(n, j, "rankify", t)])
+            theirs = _median_or_none([r.minutes_to(t) for r in runs_for(n, j, other, t)])
+            if mine is None or theirs is None:
+                parts.append(f"{t} n/a")
+            else:
+                parts.append(f"{t} {mine / theirs:.0%}")
+        lines.append(f"- rankify's time as a share of {other}'s ({goal}): " + ", ".join(parts))
+    return ["", *lines] if lines else []
 
 
 def _ece(pairs: list[tuple[float, bool]]) -> float:

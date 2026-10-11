@@ -120,6 +120,18 @@ CREATE TABLE IF NOT EXISTS logs (
     event TEXT NOT NULL,
     data TEXT
 ) STRICT;
+
+-- Why the planner asked each round: the candidates it weighed and what it chose.
+CREATE TABLE IF NOT EXISTS plans (
+    query_id INTEGER PRIMARY KEY REFERENCES queries(id),
+    mode TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    in_play INTEGER NOT NULL,
+    closeness REAL,
+    chosen TEXT,
+    candidates TEXT NOT NULL,
+    timing TEXT NOT NULL
+) STRICT;
 """
 
 
@@ -476,6 +488,58 @@ def fit_state(conn, list_id: int) -> tuple[list[int], bytes] | None:
     if row is None:
         return None
     return json.loads(row["item_ids"]), row["x"]
+
+
+# ---------------------------------------------------------------- derived: plans
+
+
+def insert_plan(
+    conn, query_id: int, *, mode, reason, in_play, closeness, chosen, candidates, timing
+) -> None:
+    conn.execute(
+        "INSERT INTO plans(query_id, mode, reason, in_play, closeness, chosen, candidates, timing)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            query_id,
+            mode,
+            reason,
+            in_play,
+            closeness,
+            None if chosen is None else json.dumps(chosen),
+            json.dumps(candidates),
+            json.dumps(timing),
+        ),
+    )
+
+
+def plan_for_round(conn, list_id: int, seq: int) -> dict | None:
+    row = conn.execute(
+        "SELECT p.*, q.seq, q.shown FROM plans p JOIN queries q ON q.id = p.query_id"
+        " WHERE q.list_id = ? AND q.seq = ?",
+        (list_id, seq),
+    ).fetchone()
+    if row is None:
+        return None
+    return {
+        "round": row["seq"],
+        "shown": json.loads(row["shown"]),
+        "mode": row["mode"],
+        "reason": row["reason"],
+        "in_play": row["in_play"],
+        "chosen": None if row["chosen"] is None else json.loads(row["chosen"]),
+        "candidates": json.loads(row["candidates"]),
+        "timing": json.loads(row["timing"]),
+    }
+
+
+def timing_samples(conn, list_id: int, judge: int) -> list[tuple[float, float]]:
+    """(closeness when asked, seconds taken) for the judge's planned rounds."""
+    rows = conn.execute(
+        "SELECT p.closeness AS z, r.ms AS ms FROM plans p JOIN rounds r ON r.query_id = p.query_id"
+        " WHERE r.list_id = ? AND r.judge_id = ? AND r.ms IS NOT NULL AND p.closeness IS NOT NULL",
+        (list_id, judge),
+    ).fetchall()
+    return [(r["z"], r["ms"] / 1000.0) for r in rows]
 
 
 def log(conn, level: str, event: str, data: dict | None = None) -> None:

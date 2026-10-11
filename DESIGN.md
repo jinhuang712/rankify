@@ -44,13 +44,23 @@ After each round, the model is fitted to all answers at once. This is what makes
 
 The fit starts from the previous scores, so one new answer needs only a few Newton steps. Each item's range comes from the curvature of the fit around its best value (the Laplace approximation). Score, Confidence and Could be all follow from the scores and their ranges. Two items that are confidently close become a confident tie, shown as `=`, and the planner stops asking about them.
 
+**The prior width is learned.** Every score starts at Normal(0, σ²), and σ is learned from the answers (MacKay 1992). A consistent judge spreads items far apart, so σ grows and each answer counts for more. A judge who contradicts themself keeps σ narrow. The width maximizes the evidence, found by expectation-maximization over the Laplace posterior (Dempster, Laird & Rubin 1977) with Aitken's acceleration. A weak prior on log σ, centred at 1.5, stops σ from collapsing on lists with few answers. Like the scores, σ depends only on the set of answers.
+
 ## Choosing the next round
 
-The planner looks for the question that teaches the most per second of your time, about the part of the ranking your mode cares about.
+The planner looks for the question that teaches the most about the **order** per second of your time, about the part of the ranking your mode cares about. For now it asks pairs. Sets of three to five come in Phase 3.
 
-It starts from the items in that part whose order is still in doubt, and builds candidate rounds from them: pairs first, then sets of three to five. For each candidate and each round type, it estimates how much the answer would reduce uncertainty. The measure is BALD (expected information gain). BALD is smarter than "pick the pair closest to 50/50": two items already known to be tied give a 50/50 answer but teach nothing, and BALD sees that. The gain is then divided by how long that kind of round takes this judge, based on their own timing history. Defaults apply until there is history.
+For each candidate pair, it estimates the mutual information between your answer and which of the two items is really better. This is in the spirit of BALD (Houlsby et al. 2011), but aimed at the order. Plain BALD measures information about the scores, so it kept asking pairs whose order was already settled, just to sharpen the size of their gap. The order measure is zero for pairs whose order is known. It is also zero for pairs already known to be tied, whose answer is a coin flip that teaches nothing.
 
-The best candidate wins, and its display order is shuffled with the round's seed. The candidates the planner weighed are saved, so `rankify why` can explain the choice. If even the best candidate is below a small floor, the session stops, because nothing left is worth asking.
+Each pair's information is weighted by how much the pair matters for the mode: the chance, over posterior draws, that either item really belongs to the part the mode settles. That part is the top 3 for Quick, the top quarter for Stable (plus a smaller weight for tier boundaries), and everything for Exact. The weighted information is then divided by how long the pair is expected to take you. That estimate comes from your own answer times, which grow on close calls (Moyer & Landauer 1967), with a flat guess until there are 20 timed answers.
+
+**Every item gets a first look.** Before the planner judges any item unimportant, every item gets at least two answers: the least-seen item goes against its most informative partner. Without this, an item that has barely been compared sits mid-ranking with a wide range and never looks like a contender. In one benchmark list, the clearly best item lost its first comparison to a slip and was never asked about again.
+
+The best candidate wins, and its display order is shuffled with the round's seed. The candidates the planner weighed are saved, so `rankify why` can explain the choice.
+
+**Stopping.** The session stops when the mode's target is reached. It also stops when nothing is worth asking: even 8 more answers to the most useful pair would teach less than 0.1 bits about the order that matters. The test looks at several answers, not one, on purpose. A judge who gets a pair right 60% of the time teaches only about 0.03 bits per answer (1 − h(0.6)), but those bits add up. A one-answer test stopped far too early on crowded lists. The 0.1-bit threshold was tuned on hidden lists the benchmark never uses (EXPERIMENT.md).
+
+Calibration lists (`--calibrate`) keep random pairs with swapped repeats. That is the design the calibration's bias correction simulates.
 
 Multi-item rounds help only in some situations. Saha & Gopalan (2019) show that with noisy answers, "pick the best of k" is no faster than pairs, while ordering the top m items is about m times faster. So picks pay off mainly when one item clearly stands out, and orderings pay off when a few items are close. The planner doesn't need these as hard-coded rules. They fall out of the gain-per-second scoring.
 
@@ -58,11 +68,11 @@ Multi-item rounds help only in some situations. Saha & Gopalan (2019) show that 
 
 Each mode is a confidence target, not a fixed number of rounds.
 
-- **Quick** stops when the winner is clear (90% Confidence over #2) and the top 3 are fairly clear (80%). Everything else stays in rough tiers.
-- **Stable** stops when the top of the list (about a quarter of it, at least 3 items) is in a confident order (90%), and the rest falls into confident tiers.
+- **Quick** stops when the winner is clear (90% Confidence over #2), the top 3 are fairly clear (80%), and no item below #3 could still be in the top 3 (its Could be range stays below). Everything else stays in rough tiers.
+- **Stable** stops when the top of the list (about a quarter of it, at least 3 items) is in a confident order (90%), no item below could still reach it, and the rest falls into confident tiers.
 - **Exact** stops when every neighbouring pair is in a confident order (95%) or is a confident tie.
 
-You can adjust the thresholds. The benchmark will tune the defaults.
+In every mode, a confident tie (at least 90% likely to be within 30 Score points) counts as settled. The thresholds can be adjusted, and the benchmark will tune the defaults. `show` reports whether the list's mode has reached its target, and `next --mode` asks one session in another mode without changing the list.
 
 ## Rounds left
 
@@ -108,7 +118,14 @@ An agent can also query the SQLite file directly.
 
 ## Speed
 
-From answer to next round should take under 50 ms for lists of up to 200 items. That breaks down into about 5 ms to save, 10 ms to refit and 30 ms to plan. The forecast gets up to a second, in the background. These are targets until measured, and performance tests will enforce them.
+From answer to next round should take under 50 ms for lists of up to 200 items. That breaks down into about 5 ms to save, 10 ms to refit and 30 ms to plan. The forecast gets up to a second, in the background. Performance tests enforce these targets.
+
+Measured on 2026-10-12, for 200 items:
+
+- Saving an answer takes 0.02 ms.
+- A refit with a fixed width takes 5 ms. Learning the width raises a warm refit to about 19 ms, over its 10 ms share.
+- Answer to next round takes 41 ms at the median and 46 ms at the 95th percentile. That is inside the 50 ms target, with little to spare.
+- Lists of 50 items or fewer take a few milliseconds per round.
 
 ## How the design applies the principles
 

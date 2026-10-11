@@ -133,7 +133,7 @@ def test_simulated_judge_ranking_matches_the_truth(rk):
     names = [f"item-{k:02d}" for k in range(12)]
     truth = dict(zip(names, rng.normal(0, 1.5, len(names))))
     rk.create_list("sim", "Simulated", names, seed=7)
-    run_rounds(rk, "sim", SimulatedJudge(truth, seed=6), 250)
+    run_rounds(rk, "sim", SimulatedJudge(truth, seed=6), 250, mode="exact")
     ranking = rk.ranking("sim")
     order = [i.name for i in ranking.items]
     assert kendall_tau(order, truth) >= 0.8

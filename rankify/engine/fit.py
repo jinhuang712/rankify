@@ -5,7 +5,8 @@ on the set of answers, never on their order. The uncertainty comes from the Lapl
 approximation: the covariance is the inverse of the negative Hessian at the best fit.
 """
 
-from dataclasses import dataclass
+import math
+from dataclasses import dataclass, replace
 
 import numpy as np
 
@@ -19,6 +20,7 @@ class Fit:
     n: int
     iterations: int
     log_posterior: float
+    sigma: float | None = None  # the prior width the fit used, when it was learned
 
     @property
     def theta(self) -> np.ndarray:
@@ -105,3 +107,91 @@ def fit_pairs(
     cov = np.zeros((n + 2, n + 2))
     cov[np.ix_(free, free)] = np.linalg.inv(neg_h)
     return Fit(x=x, cov=cov, n=n, iterations=iteration, log_posterior=f)
+
+
+# ---------------------------------------------------------------- learning the prior width
+
+
+@dataclass(frozen=True)
+class SigmaPrior:
+    """Belief about the prior width before any answers: log(sigma) ~ Normal(log(center), sd²).
+
+    It keeps the learned width sensible on lists with few answers, where the data alone
+    would let it collapse toward zero.
+    """
+
+    center: float = 1.5
+    sd: float = 0.75
+
+
+DEFAULT_SIGMA_PRIOR = SigmaPrior()
+
+
+def fit_pairs_learning_sigma(
+    n: int,
+    pairs: Pairs,
+    prior: Prior = DEFAULT_PRIOR,
+    hyper: SigmaPrior = DEFAULT_SIGMA_PRIOR,
+    *,
+    ties: bool = True,
+    bias: bool = True,
+    x0: np.ndarray | None = None,
+    sigma0: float | None = None,
+    tol: float = 1e-10,
+    max_rounds: int = 200,
+) -> Fit:
+    """Fit item scores and learn the prior width from the answers themselves.
+
+    A consistent judge spreads items far apart, so the width grows and each answer counts
+    for more. A judge who often contradicts themself keeps it narrow. The width maximizes the
+    evidence (type-II maximum a posteriori; MacKay 1992), found by expectation-maximization
+    over the Laplace posterior (Dempster, Laird & Rubin 1977) with Aitken acceleration. The
+    result depends only on the answers: ``x0`` and ``sigma0`` change the speed, not the end.
+    """
+
+    def update(log_sigma: float, x) -> tuple[float, Fit]:
+        fit = fit_pairs(
+            n, pairs, replace(prior, sigma=math.exp(log_sigma)), ties=ties, bias=bias, x0=x
+        )
+        spread = float(np.sum(fit.theta**2) + np.trace(fit.theta_cov))
+        return _best_log_sigma(spread, n, log_sigma, hyper), fit
+
+    s = math.log(sigma0 if sigma0 else hyper.center)
+    x, steps = x0, 0
+    s_prev = g_prev = None
+    for _ in range(max_rounds):
+        em, fit = update(s, x)  # one EM step from s
+        x, steps = fit.x, steps + 1
+        g = em - s  # the EM residual; the width we want has g = 0
+        if abs(g) < tol:
+            s = em
+            break
+        # Plain EM can crawl (with few answers each step is ~0.95 of the last), so take a
+        # secant step on the residual instead, but only when it moves the same way as the EM
+        # step: far from the answer the residual can grow, and the secant would then run the
+        # wrong way (Aitken's acceleration has the same flaw).
+        step = em - s
+        if s_prev is not None and g_prev is not None and abs(g - g_prev) > 1e-15:
+            secant = -g * (s - s_prev) / (g - g_prev)
+            if secant * g > 0:
+                step = float(np.clip(secant, g - 1.0, g + 1.0))
+        s_prev, g_prev, s = s, g, s + step
+    else:
+        raise FitError(f"prior width did not converge in {max_rounds} rounds")
+    final = fit_pairs(n, pairs, replace(prior, sigma=math.exp(s)), ties=ties, bias=bias, x0=x)
+    return replace(final, iterations=steps, sigma=math.exp(s))
+
+
+def _best_log_sigma(spread: float, n: int, start: float, hyper: SigmaPrior) -> float:
+    """M-step: the log width that best explains the scores' expected spread, given the
+    hyperprior. Solves -n + spread * e^(-2s) - (s - mu) / tau² = 0 by Newton's method."""
+    mu, tau2 = math.log(hyper.center), hyper.sd**2
+    s = start
+    for _ in range(100):
+        e = spread * math.exp(-2 * s)
+        g = -n + e - (s - mu) / tau2
+        step = g / (2 * e + 1 / tau2)
+        s += step
+        if abs(step) < 1e-13:
+            break
+    return s

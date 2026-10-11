@@ -22,7 +22,7 @@ This phase builds the parts everything else rests on, for pair rounds only:
 
 Two things were left for Phase 2. The prior width is fixed at `sigma = 1.5` and is not yet learned from the judge's consistency. Random pairs take many rounds to find the true #1 (77% after 300 rounds), which is the planner's job.
 
-## Phase 2: Planner and benchmark, pairs only
+## Phase 2: Planner and benchmark, pairs only ✅
 
 This phase builds:
 
@@ -46,6 +46,23 @@ This phase builds:
 - If the planner beats Just Sort It by at least 20% in time (G2), continue to Phase 3.
 - If it beats Elo but not Just Sort It, use Just Sort It's way of picking questions with our fit, and re-plan Phase 3 around it.
 - If Confidence isn't calibrated (G5), fix the model or the prior before anything else.
+
+**Result (2026-10-12): passed for Quick, mixed for Stable; continue to Phase 3.**
+
+What was built:
+
+- The planner picks pairs by order information per second, weighted by how much each pair matters for the mode. Every item gets first looks, and the stopping rules include a Could be check and an 8-answer floor.
+- The prior width is learned from the answers.
+- `why`, `next --mode` and `play --mode` were added.
+- The benchmark took the place of a separate `sim` command, with three judges (human, perfect, noisy) instead of nine.
+
+The [v1](experiments/2026-10-12-phase2-planner-v1.md) and [v2](experiments/2026-10-12-phase2-planner-v2.md) reports, and the tuning between them, are summarized in [EXPERIMENT.md](EXPERIMENT.md#results). Against the checks above:
+
+- **Confidence is calibrated:** error 0.038–0.049.
+- **G2 (beat Just Sort It by 20%) holds for Quick:** 52% of its time on 20 items and 76% on 10. It does not hold for Stable on 10 items (95%).
+- **G1 (half of Elo's time) holds for 20-item Quick (23%)** but not on 10 items: 66% for Quick and 67% for Stable.
+
+Phase 3's questions about 3–5 items are the main lever for the 10-item gap. One ordering settles several neighbour pairs at once, and that should also cut the confirmation rounds after the ranking is already right.
 
 ## Phase 3: Mixed rounds
 

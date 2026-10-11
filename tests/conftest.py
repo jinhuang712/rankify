@@ -2,7 +2,7 @@ import numpy as np
 import pytest
 
 from rankify import store
-from rankify.service import Rankify
+from rankify.service import NothingToAsk, Rankify
 
 
 @pytest.fixture
@@ -30,10 +30,16 @@ class SimulatedJudge:
         return 1 if self.rng.random() < p_first else 2
 
 
-def run_rounds(rk: Rankify, slug: str, judge: SimulatedJudge, rounds: int) -> list[tuple[str, str]]:
+def run_rounds(
+    rk: Rankify, slug: str, judge: SimulatedJudge, rounds: int, mode: str | None = None
+) -> list[tuple[str, str]]:
+    """Answer up to ``rounds`` rounds; stops early when rankify has nothing left to ask."""
     asked = []
     for _ in range(rounds):
-        view = rk.next_round(slug)
+        try:
+            view = rk.next_round(slug, mode=mode)
+        except NothingToAsk:
+            break
         names = [i.name for i in view.items]
         asked.append(tuple(names))
         rk.answer(slug, [judge.pick(names)], round_seq=view.round)

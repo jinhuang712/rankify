@@ -1,6 +1,14 @@
 # rankify CLI
 
-> **Partly built.** Working now: `new` (with `--method` and `--calibrate`), `add`, `remove`, `lists`, `next` (random pairs for rankify), `answer`, `undo`, `show`, `verify`, `bench`, `calibrate`, and a minimal `play`. Everything else here is planned. Exit code 3 is used by methods that finish, such as `insertion-sort`. `next --json` returns `"rounds_left": null` and `show --json` returns `"target_reached": null` until the forecast and the stopping rules exist.
+> **Partly built.** Working now:
+>
+> - `new` (with `--method` and `--calibrate`), `add`, `remove` and `lists`
+> - `next`: the rankify planner, with `--mode` to override the list's mode
+> - `answer`, `undo` and a minimal `play`
+> - `show`, which reports whether the mode's target is reached, and `why`
+> - `verify`, `bench` and `calibrate`
+>
+> Everything else here is planned. `next` exits with code 3 when the mode's target is reached or nothing is left worth asking. `next --json` returns `"rounds_left": null` until the forecast exists (Phase 4).
 
 The CLI is the main way to use rankify, and also the way rankify is tested. The terminal UI, the simulator, the test suite and AI agents all drive the same commands.
 
@@ -75,6 +83,8 @@ rankify next travel --json
 rankify answer travel --round 23 2 1 3
 ```
 
+`next --mode exact` asks this session in another mode without changing the list. A script that measures answer times itself can pass them with `answer --ms 2400`. The benchmark does this, so the planner learns the judge's pace.
+
 ## See results
 
 ```sh
@@ -83,6 +93,8 @@ rankify show travel --tiers       # grouped into tiers
 rankify why travel --round 17     # why that round was asked
 rankify report travel --format md # report for an AI agent; md or json
 ```
+
+`why` lists the pairs the planner weighed, best first. For each pair it shows the expected bits about their order that matter for the mode, the expected answer time, and how likely the first item was to win. It works for rounds the planner chose. Calibration repeats, undos and baseline methods have no plan to show.
 
 ## Manage data
 
