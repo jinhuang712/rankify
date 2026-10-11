@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.hypothesis/
+.ruff_cache/
+.mypy_cache/
+dist/
+build/
+*.egg-info/
+
+# Local data: personal rankings stay on this machine
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+!experiments/**/*.db
+
+# OS and editors
+.DS_Store
+.idea/
+.vscode/
