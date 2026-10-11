@@ -15,6 +15,43 @@ This is how we find out whether rankify works, before we trust it or build more 
 
 Goal numbers refer to [GOALS.md](GOALS.md).
 
+## The standing benchmark: `rankify bench`
+
+Every change to rankify is compared against rating systems built for human judges with `rankify bench`, and the report is saved in `experiments/`. The benchmark runs each method the way a person would use it:
+
+1. Draw hidden scores for N items. The shape is a few clear favourites and a crowded middle (a Student-t distribution with 3 degrees of freedom).
+2. Make a fresh list with `rankify new --method <method>`.
+3. Each round, `rankify next --json` asks a question. A simulated judge compares the two items' hidden scores and answers with `rankify answer --round` or `--cant-decide`. Then `rankify show --json` records the method's current ranking.
+4. Stop at the round budget, or when the method says it has nothing left to ask (exit code 3).
+
+Every method sees the same hidden lists. The calls run in-process through the real CLI code. A separate sample times real `rankify` subprocesses.
+
+**The methods.** The main comparison is with rating systems built for human judges: `elo`, `elo-close` (Elo with pairs of close ratings), `glicko2`, `trueskill`, `openskill` and `arena` (random pairs with a Bradley–Terry fit, the way Chatbot Arena works). Two sorts run as reference lines only: `just-sort-it` and `insertion-sort`. Sorting assumes a judge who answers the same way every time, and people don't, so the sorts show the floor for a perfect judge rather than a fair competitor.
+
+**The judges.**
+
+- **human**, the headline. It behaves the way the research says people do. Perceived quality carries noise, so close items get confused (Thurstone 1927). The noise grows with fatigue. It leans toward the item shown first. It sometimes answers at random (lapses; Wichmann & Hill 2001). It says "can't decide" on near-ties. It takes longer on close calls (the distance effect; Moyer & Landauer 1967). Every setting is a guess until a real session calibrates it (Part 2).
+- **perfect**, a sanity check. It is always right.
+- **noisy**, optional. It uses Bradley–Terry noise only, which is the model rankify itself assumes.
+
+Swaps between near-ties don't count as errors. A near-tie is a pair the human judge gets right less than 55% of the time.
+
+The report measures:
+
+- rounds and human minutes to reach Quick, Stable and Exact. These use the same definitions as the full grid below, and the minutes come from the judge's simulated answer times.
+- Kendall τ against the hidden scores as rounds go by
+- wasted questions: answers that already followed from earlier answers, and exact repeats
+- Confidence calibration and Could be coverage, for methods that report them
+- whether the ranking changes when the same answers come in a different order
+- milliseconds per CLI call
+- which requirements from the proposal each method meets, with unbuilt rankify features shown as gaps
+
+```sh
+uv run rankify bench --items 10,20 --runs 20 --report experiments/<date>-<name>.md
+```
+
+The full grid in Part 1 extends this with more judges, sizes and seeds.
+
 ## Part 1: Simulated benchmark
 
 ### Ground truth and simulated judges
@@ -132,4 +169,12 @@ rankify sim --items 10 --judge normal --method planner-full --seed 7 --trace
 
 ## Results
 
-Results will go in `experiments/` as databases, plots and a short write-up per run, linked from here. There are none yet.
+Results go in `experiments/`, one report per run, linked from here.
+
+- [2026-10-11: Phase 1 against Elo and others](experiments/2026-10-11-phase1-vs-elo.md). This report used only the perfect and Bradley–Terry judges, which turned out to favour sorting. Replaced by the next entry.
+- [2026-10-12: Phase 1 against rating systems, with a human judge](experiments/2026-10-12-human-judge.md). rankify still asks random pairs.
+  - Against the rating systems, rankify is mid-pack to slightly ahead. On 10 items it reached Quick in 62 rounds (2.5 min); Elo needed 64 and TrueSkill 78. On 20 items it beat Elo and Arena on Quick but trailed Glicko-2 (259 rounds against 126).
+  - No method reached Exact on 20 items with the human judge.
+  - About 90% of questions in every random-pair method were already answered by earlier answers.
+  - With the human judge, Confidence is calibrated (error 0.017–0.032), and Could be is slightly too wide (96–98%). The earlier "too cautious" result came from the unrealistic judges.
+  - Insertion sort collapses with a human judge.

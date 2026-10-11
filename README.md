@@ -2,7 +2,19 @@
 
 Rank anything by answering a few quick questions, with real statistics behind every answer.
 
-> **Status: design phase.** There is no code yet. The documents below describe what we are building, the rules it follows, and how we will test it.
+> **Status: Phase 1 done.** Pair rounds work end to end from the CLI: make a list, answer rounds, see the ranking with Score, Confidence and Could be. Rounds are still random pairs. The planner that picks decisive rounds is Phase 2 (see [ROADMAP.md](ROADMAP.md)).
+
+## Try it
+
+```sh
+uv sync
+uv run rankify new travel "Places I want to go" --items places.txt
+uv run rankify next travel
+uv run rankify answer travel 1
+uv run rankify show travel
+uv run rankify bench --runs 5     # compare against Elo and other rating systems
+uv run pytest
+```
 
 ## Why
 
@@ -47,6 +59,48 @@ All commands are in [rankify/cli/CLI.md](rankify/cli/CLI.md).
 ## Planned stack
 
 Python, packaged with uv. Typer for the CLI, Textual for the terminal UI, numpy for the math, and a local SQLite file for all data.
+
+## References
+
+The books, papers and software that rankify builds on or measures itself against. Entries marked † were checked online for this project. The others are cited from memory, so check the details before you cite them elsewhere.
+
+### Models of comparison and choice
+
+- Thurstone, L. L. (1927). A law of comparative judgment. *Psychological Review*. Perceived quality carries noise, so close items get confused. This is the basis of the benchmark's human judge.
+- Bradley, R. A. & Terry, M. E. (1952). Rank analysis of incomplete block designs: the method of paired comparisons. *Biometrika*. The pair model at rankify's core.
+- Luce, R. D. (1959). *Individual Choice Behavior: A Theoretical Analysis*. Wiley. The choice axiom behind "pick the best of these".
+- Plackett, R. L. (1975). The analysis of permutations. *Applied Statistics*. Extends the model to full orderings ("put these in order").
+- Davidson, R. R. (1970). On extending the Bradley–Terry model to accommodate ties in paired comparison experiments. *Journal of the American Statistical Association*. How rankify counts "can't decide".
+- Debreu, G. (1960). Review of R. D. Luce, *Individual Choice Behavior*. *American Economic Review*. Shows how near-identical options break Luce's axiom.
+- Tversky, A. (1972). Elimination by aspects: a theory of choice. *Psychological Review*. Explains why similar items split votes.
+
+### Rating systems built for human judges (benchmark baselines)
+
+- Elo, A. E. (1978). *The Rating of Chessplayers, Past and Present*. Arco.
+- Glickman, M. E. (1999). Parameter estimation in large dynamic paired comparison experiments. *Applied Statistics*. The Glicko system, the first to give ratings a deviation.
+- Glickman, M. E. (2001). Dynamic paired comparison models with stochastic variances. *Journal of Applied Statistics*. Glicko-2.
+- Herbrich, R., Minka, T. & Graepel, T. (2007). TrueSkill: a Bayesian skill rating system. *Advances in Neural Information Processing Systems 19*.
+- Weng, R. C. & Lin, C.-J. (2011). A Bayesian approximation method for online ranking. *Journal of Machine Learning Research*. The method behind openskill.
+- † LMSYS (2023). [Chatbot Arena: new models & Elo system update](https://lmsys.org/blog/2023-12-07-leaderboard). Chatbot Arena moved from online Elo to a Bradley–Terry fit for more stable ratings.
+
+### Choosing questions and sorting
+
+- Ford, L. R. & Johnson, S. M. (1959). A tournament problem. *American Mathematical Monthly*. Merge insertion, which gets close to the fewest comparisons a sort can use.
+- † Houlsby, N., Huszár, F., Ghahramani, Z. & Lengyel, M. (2011). [Bayesian active learning for classification and preference learning](https://arxiv.org/abs/1112.5745). BALD, the rule rankify's planner will use to pick questions.
+- † Maystre, L. & Grossglauser, M. (2017). [Just sort it! A simple and effective approach to active preference learning](https://proceedings.mlr.press/v70/maystre17a.html). *ICML*. Repeated quicksort; the strong reference baseline.
+- † Saha, A. & Gopalan, A. (2019). [Active ranking with subset-wise preferences](https://arxiv.org/abs/1810.10321). *AISTATS*. Finds that "pick the best" is no faster than pairs, while ordering m items is up to m times faster.
+- Chen, X., Bennett, P. N., Collins-Thompson, K. & Horvitz, E. (2013). Pairwise ranking aggregation in a crowdsourced setting. *WSDM*. Crowd-BT, which weighs judges by reliability. Relevant once many people rank one list.
+
+### How people answer (the benchmark's human judge)
+
+- Moyer, R. S. & Landauer, T. K. (1967). Time required for judgements of numerical inequality. *Nature*. The distance effect: close calls take longer.
+- Wichmann, F. A. & Hill, N. J. (2001). The psychometric function: I. Fitting, sampling, and goodness of fit. *Perception & Psychophysics*. Lapses, the occasional answer given at random.
+
+### Software
+
+- † [choix](https://pypi.org/project/choix/) (Maystre): Bradley–Terry and Plackett–Luce fits. Our reference in tests.
+- † [openskill](https://pypi.org/project/openskill/), † [trueskill](https://pypi.org/project/trueskill/) and † [glicko2](https://pypi.org/project/glicko2/): the rating systems in the benchmark.
+- † [corsort](https://pypi.org/project/corsort): research on sorts that give a useful result when stopped early.
 
 ## License
 

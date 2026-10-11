@@ -82,6 +82,7 @@ Everything else is derived and can be rebuilt: fits (scores and ranges after eac
 rankify/
   engine/     the math; no I/O
   store/      SQLite; no math
+  service.py  ties the engine to the store; everything else calls this
   cli/        commands (see cli/CLI.md)
   tui/        the terminal UI
   report/     the agent report
@@ -122,10 +123,4 @@ The numbers refer to [PHILOSOPHY.md](PHILOSOPHY.md).
 
 ## References
 
-- Bradley, R. A. & Terry, M. E. (1952). Rank analysis of incomplete block designs. *Biometrika*.
-- Luce, R. D. (1959). *Individual Choice Behavior*.
-- Plackett, R. L. (1975). The analysis of permutations. *Applied Statistics*.
-- Davidson, R. R. (1970). On extending the Bradley–Terry model to accommodate ties. *JASA*.
-- Houlsby, N. et al. (2011). [Bayesian active learning for classification and preference learning](https://arxiv.org/abs/1112.5745).
-- Saha, A. & Gopalan, A. (2019). [Active ranking with subset-wise preferences](https://arxiv.org/abs/1810.10321).
-- Maystre, L. & Grossglauser, M. (2017). [Just sort it! A simple and effective approach to active preference learning](https://proceedings.mlr.press/v70/maystre17a.html).
+The full list of books, papers and software is in the [README](README.md#references).

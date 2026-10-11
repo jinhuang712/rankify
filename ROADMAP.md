@@ -6,7 +6,7 @@ Each phase ends with a check. We write down what we found, and whether we contin
 
 We wrote the proposal, philosophy, design, goals, experiment plan, roadmap and CLI reference, and created the public repository.
 
-## Phase 1: Foundations
+## Phase 1: Foundations ✅
 
 This phase builds the parts everything else rests on, for pair rounds only:
 
@@ -18,15 +18,28 @@ This phase builds the parts everything else rests on, for pair rounds only:
 
 **Check:** sanity checks 1, 2 and 4 in [EXPERIMENT.md](EXPERIMENT.md#sanity-checks-first) pass, and a refit takes under 10 ms for 200 items.
 
+**Result (2026-10-11):** passed. Our fit matches `choix` within 1e-4. Shuffling the answers changes no number by more than 1e-9 (60 Hypothesis cases). Replay gives the same rounds. A warm refit takes 4.0 ms for 200 items and 2,000 answers, and answer to next round takes 16 ms (95th percentile) for 200 items. In a quick check with a simulated judge (15 items, 30 runs, random pairs), the median Kendall tau rose from 0.50 after 25 rounds to 0.87 after 300. The expected calibration error of Confidence was 0.047. Could be held the true rank 94–98% of the time, which is wider than the 90% it claims. The full benchmark in Phase 2 will check both properly.
+
+Two things were left for Phase 2. The prior width is fixed at `sigma = 1.5` and is not yet learned from the judge's consistency. Random pairs take many rounds to find the true #1 (77% after 300 rounds), which is the planner's job.
+
 ## Phase 2: Planner and benchmark, pairs only
 
 This phase builds:
 
 - the planner: BALD gain per second over pair candidates, the "nothing worth asking" floor, and saved plans
+- the prior width learned from the judge's consistency, in place of the fixed `sigma = 1.5`
 - the stopping rules for Quick, Stable and Exact
 - the simulator, with all nine judges and simulated time
 - the baselines: Elo (random and close pairs), random pairs with our fit, openskill, merge-insertion sort, and Just Sort It
 - the `sim` and `why` commands
+
+**Done early (2026-10-12):** `rankify bench`, which drives every method through the CLI against a simulated human judge. The baselines are rating systems built for human judges, available as `--method` options: `elo`, `elo-close`, `glicko2`, `trueskill`, `openskill` and `arena`. Two sorts (`just-sort-it`, `insertion-sort`) run as reference lines. The [human-judge report](experiments/2026-10-12-human-judge.md) sets the bar for the planner:
+
+- **Wasted questions.** About 90% of rankify's questions were already answered by earlier answers. The same holds for every rating system, because they all ask random pairs. This is the planner's main opportunity.
+- **Today rankify is level with the rating systems, not ahead.** On 20 items it reached Quick in 259 rounds; Glicko-2 needed 126 and Elo 315. That is far from the goal of a third of Elo's time (G1).
+- **Exact is out of reach for a human judge on 20 items.** No method got there. That supports precision modes, where Quick and Stable are the realistic targets.
+- **Confidence is calibrated with the human judge** (error 0.017–0.032). With a perfect judge it is still too cautious (0.12–0.13), so the prior width should be learned from each judge's consistency.
+- **The human judge's settings are guesses.** A real session calibrates them once Phase 1 is landed.
 
 **Check:** run the pairs-only part of the grid. What happens next depends on the result:
 

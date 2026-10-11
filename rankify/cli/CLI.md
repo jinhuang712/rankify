@@ -1,6 +1,6 @@
 # rankify CLI
 
-> **Planned.** Nothing here is implemented yet.
+> **Partly built.** Working now: `new` (with `--method`), `add`, `remove`, `lists`, `next` (random pairs for rankify), `answer`, `undo`, `show`, `verify` and `bench`. Everything else here is planned. Exit code 3 is used by methods that finish, such as `insertion-sort`. `next --json` returns `"rounds_left": null` and `show --json` returns `"target_reached": null` until the forecast and the stopping rules exist.
 
 The CLI is the main way to use rankify, and also the way rankify is tested. The terminal UI, the simulator, the test suite and AI agents all drive the same commands.
 
@@ -88,11 +88,19 @@ rankify rebuild travel            # rebuild derived data after an engine upgrade
 ## Benchmark
 
 ```sh
-rankify sim --items 10 --judge normal --method planner-full --seed 7 --trace
-rankify sim --config experiments/grid-v1.toml --out experiments/grid-v1.db
+rankify bench --items 10,20 --runs 20 --report experiments/2026-10-12-human-judge.md
+rankify bench --judges human,perfect,noisy --methods rankify,elo,glicko2
+rankify new demo "Demo" --items items.txt --method trueskill   # run any method by hand
 ```
 
-The benchmark is described in [EXPERIMENT.md](../../EXPERIMENT.md).
+`bench` draws hidden scores and runs every method through these same commands. A simulated judge answers each round, and the default is one that behaves like a person.
+
+`--method` picks the ranking method for a list. `rankify` is the default. The others are baselines to compare against:
+
+- Rating systems: `elo`, `elo-close`, `glicko2`, `trueskill`, `openskill` and `arena`.
+- Reference sorts: `just-sort-it` and `insertion-sort`.
+
+Glicko-2, TrueSkill and openskill need the development dependencies (`uv sync`). The benchmark is described in [EXPERIMENT.md](../../EXPERIMENT.md).
 
 ## JSON output
 
