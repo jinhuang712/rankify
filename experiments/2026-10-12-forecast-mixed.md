@@ -1,10 +1,12 @@
 # Benchmark: rankify against rating systems for human judges
 
-> **Reused runs.** The 640 runs of the rating systems and the sorts came from the Phase 4 benchmark (which reused them from Phase 3): their code didn't change. Both rankify variants ran again, to record the new rounds-left forecasts. Apart from the forecasts and timings, all 480 of their runs match the Phase 4 runs exactly; the forecast doesn't change which rounds are asked.
+> **Reused runs.** The 640 runs of the rating systems and the sorts came from the Phase 4 benchmark (which reused them from Phase 3): their code didn't change. Both rankify variants ran again, to record the new rounds-left forecasts. Apart from the forecasts and timings, all 240 pairs runs match Phase 4 exactly. 18 of 240 mixed runs differ: the planner now computes the information of an ordering in a faster way that agrees to 1e-15, which changes which of two equally good sets is asked. The mixed results moved only slightly (G3 time shares 100%, 63%, 74% against 100%, 62%, 76%).
 
-- Date: 2026-10-12 03:53 UTC
-- Code: commit 18d9583 + uncommitted changes, engine 0.3.0
-- Setup: 10, 20 items; judges: human, perfect; 20 hidden lists per setting, the same for every method; budget 20 rounds per item; wall time 1140 s for 480 runs; the other 640 came from the cache.
+> **Exact with a larger budget.** With 20 rounds per item, Exact sessions on pairs don't finish, so their forecasts can't be scored here. A separate run gave Exact 60 rounds per item (human judge, 20 lists): every session finished. Pairs: the range held 71% (10 items) and 65% (20 items), the median off by 11% and 5%. Mixed: 68% and 55%, off by 30% and 21%.
+
+- Date: 2026-10-12 06:20 UTC
+- Code: commit 3e97d4b + uncommitted changes, engine 0.3.0
+- Setup: 10, 20 items; judges: human, perfect; 20 hidden lists per setting, the same for every method; budget 20 rounds per item; wall time 1061 s for 480 runs; the other 640 came from the cache.
 - Every method ran through the CLI: `new --method`, then `next`, `answer` (or `--cant-decide`) and `show` each round.
 - Hidden scores: a few clear favourites and a crowded middle (Student-t with 3 degrees of freedom, times 1.50).
 
@@ -83,12 +85,12 @@ Rounds left (G7: the range holds the actual rounds left 70–90% of the time, th
 
 | Method | Mode | Scored | Range held | Median off by (median) | "At least" | Unscored |
 |---|---|---|---|---|---|---|
-| rankify | quick | 84 | 76% | 20% | 0 | 0 |
-| rankify | stable | 94 | 81% | 16% | 0 | 0 |
-| rankify | exact | 46 | 43% | 21% | 19 | 54 |
-| rankify-mixed | quick | 57 | 79% | 42% | 0 | 0 |
-| rankify-mixed | stable | 66 | 91% | 15% | 0 | 0 |
-| rankify-mixed | exact | 79 | 62% | 35% | 0 | 0 |
+| rankify | quick | 84 | 69% | 20% | 0 | 0 |
+| rankify | stable | 94 | 73% | 16% | 0 | 0 |
+| rankify | exact | 45 | 47% | 24% | 0 | 55 |
+| rankify-mixed | quick | 57 | 74% | 36% | 0 | 0 |
+| rankify-mixed | stable | 66 | 83% | 18% | 0 | 0 |
+| rankify-mixed | exact | 79 | 68% | 31% | 0 | 0 |
 
 Kendall τ with the hidden scores (median; 1 = identical):
 
@@ -127,7 +129,7 @@ Rounds and human minutes to reach each target (median over lists; `—` = not re
 | Method | Quick | Stable | Exact |
 |---|---|---|---|
 | **rankify** | 74 · 3.4 min (12/20) | — (5/20) | — (0/20) |
-| **rankify-mixed** | 28 · 3.6 min (13/20) | — (4/20) | — (0/20) |
+| **rankify-mixed** | 28 · 3.6 min (13/20) | — (3/20) | — (0/20) |
 | elo | 315 · 13.3 min (12/20) | — (4/20) | — (0/20) |
 | elo-close | 184 · 8.6 min (17/20) | — (3/20) | — (0/20) |
 | glicko2 | 126 · 5.6 min (15/20) | — (2/20) | — (0/20) |
@@ -151,9 +153,9 @@ When rankify-mixed stopped by itself, in each mode (median over lists that stopp
 
 | Mode | Stopped by itself | Target really met at the stop | G8 at the stop | Rounds | Minutes |
 |---|---|---|---|---|---|
-| quick | 20/20 | 12/20 | #1 right in 19/20 | 35 | 4.4 |
-| stable | 20/20 | 4/20 | 91% of pairs right | 70 | 10.6 |
-| exact | 20/20 | 0/20 | 78% of pairs right | 157 | 21.5 |
+| quick | 20/20 | 12/20 | #1 right in 19/20 | 36 | 4.5 |
+| stable | 20/20 | 3/20 | 90% of pairs right | 72 | 10.5 |
+| exact | 20/20 | 0/20 | 77% of pairs right | 154 | 21.7 |
 
 G8 asks less than the targets above: Quick, the true #1 on top in at least 90% of lists; Stable, at least 90% of neighbour pairs in the top quarter in the right order; Exact, at least 95% of all neighbour pairs. Swaps of near-ties don't count.
 
@@ -168,20 +170,20 @@ Round mix, per mode (share of rounds; median seconds per round of that kind):
 | rankify | quick | 100% · 2.4 s | 0% | 0% |
 | rankify | stable | 100% · 2.7 s | 0% | 0% |
 | rankify | exact | 100% · 3.1 s | 0% | 0% |
-| rankify-mixed | quick | 10% · 3.2 s | 6% · 3.8 s | 84% · 7.9 s |
-| rankify-mixed | stable | 9% · 3.1 s | 3% · 4.0 s | 88% · 8.8 s |
-| rankify-mixed | exact | 24% · 3.3 s | 2% · 3.9 s | 74% · 9.1 s |
+| rankify-mixed | quick | 13% · 2.9 s | 6% · 3.8 s | 82% · 7.8 s |
+| rankify-mixed | stable | 12% · 3.1 s | 3% · 3.9 s | 85% · 8.8 s |
+| rankify-mixed | exact | 22% · 3.4 s | 2% · 3.9 s | 76% · 9.2 s |
 
 Rounds left (G7: the range holds the actual rounds left 70–90% of the time, the median is off by at most 25%). Forecasts made at rounds 0, 10, 25, 50, 100. Lists that ran out of budget add their known misses; their other forecasts can't be scored and are counted as "Unscored".
 
 | Method | Mode | Scored | Range held | Median off by (median) | "At least" | Unscored |
 |---|---|---|---|---|---|---|
-| rankify | quick | 85 | 89% | 24% | 0 | 0 |
-| rankify | stable | 100 | 78% | 14% | 0 | 0 |
+| rankify | quick | 85 | 81% | 16% | 0 | 0 |
+| rankify | stable | 100 | 72% | 18% | 0 | 0 |
 | rankify | exact | 0 | — | — | 0 | 100 |
-| rankify-mixed | quick | 60 | 80% | 41% | 0 | 0 |
-| rankify-mixed | stable | 81 | 77% | 25% | 0 | 0 |
-| rankify-mixed | exact | 100 | 53% | 29% | 0 | 0 |
+| rankify-mixed | quick | 61 | 80% | 29% | 0 | 0 |
+| rankify-mixed | stable | 81 | 79% | 20% | 0 | 0 |
+| rankify-mixed | exact | 100 | 55% | 24% | 0 | 0 |
 
 Kendall τ with the hidden scores (median; 1 = identical):
 
@@ -203,7 +205,7 @@ Wasted questions, up to the round where Exact was reached (or the whole budget):
 | Method | Already implied | Exact repeats | Stopped by itself |
 |---|---|---|---|
 | **rankify** | 87% | 73% | 0/20 |
-| **rankify-mixed** | 90% | 36% | 20/20 |
+| **rankify-mixed** | 90% | 35% | 20/20 |
 | elo | 90% | 58% | 0/20 |
 | elo-close | 88% | 69% | 0/20 |
 | glicko2 | 90% | 58% | 0/20 |
@@ -269,12 +271,12 @@ Rounds left (G7: the range holds the actual rounds left 70–90% of the time, th
 
 | Method | Mode | Scored | Range held | Median off by (median) | "At least" | Unscored |
 |---|---|---|---|---|---|---|
-| rankify | quick | 60 | 18% | 189% | 0 | 0 |
-| rankify | stable | 80 | 30% | 99% | 0 | 0 |
-| rankify | exact | 80 | 11% | 139% | 38 | 0 |
-| rankify-mixed | quick | 40 | 28% | 248% | 0 | 0 |
-| rankify-mixed | stable | 50 | 38% | 138% | 0 | 0 |
-| rankify-mixed | exact | 60 | 33% | 211% | 0 | 0 |
+| rankify | quick | 60 | 13% | 188% | 0 | 0 |
+| rankify | stable | 80 | 26% | 98% | 0 | 0 |
+| rankify | exact | 80 | 21% | 164% | 0 | 0 |
+| rankify-mixed | quick | 40 | 28% | 200% | 0 | 0 |
+| rankify-mixed | stable | 50 | 24% | 112% | 0 | 0 |
+| rankify-mixed | exact | 60 | 28% | 171% | 0 | 0 |
 
 Kendall τ with the hidden scores (median; 1 = identical):
 
@@ -313,7 +315,7 @@ Rounds and human minutes to reach each target (median over lists; `—` = not re
 | Method | Quick | Stable | Exact |
 |---|---|---|---|
 | **rankify** | 34 · 1.6 min (20/20) | 72 · 3.2 min (20/20) | 81 · 4.1 min (20/20) |
-| **rankify-mixed** | 13 · 1.6 min (20/20) | 14 · 1.9 min (20/20) | 22 · 3.1 min (20/20) |
+| **rankify-mixed** | 13 · 1.6 min (20/20) | 14 · 2.0 min (20/20) | 22 · 3.0 min (20/20) |
 | elo | 191 · 8.4 min (18/20) | 374 · 16.2 min (11/20) | — (0/20) |
 | elo-close | 73 · 3.5 min (20/20) | 174 · 9.1 min (20/20) | — (0/20) |
 | glicko2 | 89 · 4.0 min (19/20) | 270 · 11.6 min (15/20) | — (3/20) |
@@ -339,13 +341,13 @@ When rankify-mixed stopped by itself, in each mode (median over lists that stopp
 |---|---|---|---|---|---|
 | quick | 20/20 | 20/20 | #1 right in 20/20 | 20 | 2.7 |
 | stable | 20/20 | 20/20 | 100% of pairs right | 38 | 4.9 |
-| exact | 20/20 | 20/20 | 100% of pairs right | 122 | 12.5 |
+| exact | 20/20 | 20/20 | 100% of pairs right | 118 | 12.3 |
 
 G8 asks less than the targets above: Quick, the true #1 on top in at least 90% of lists; Stable, at least 90% of neighbour pairs in the top quarter in the right order; Exact, at least 95% of all neighbour pairs. Swaps of near-ties don't count.
 
 - rankify's time as a share of elo's (G1: at most 50%): quick 19%, stable 19%, exact n/a
 - rankify's time as a share of just-sort-it's (G2: at most 80%): quick 34%, stable 61%, exact 66%
-- rankify-mixed's time as a share of rankify's (G3: under 100%): quick 100%, stable 62%, exact 76%
+- rankify-mixed's time as a share of rankify's (G3: under 100%): quick 100%, stable 63%, exact 74%
 
 Round mix, per mode (share of rounds; median seconds per round of that kind):
 
@@ -354,20 +356,20 @@ Round mix, per mode (share of rounds; median seconds per round of that kind):
 | rankify | quick | 100% · 2.4 s | 0% | 0% |
 | rankify | stable | 100% · 2.7 s | 0% | 0% |
 | rankify | exact | 100% · 3.1 s | 0% | 0% |
-| rankify-mixed | quick | 4% · 2.5 s | 10% · 3.6 s | 85% · 8.2 s |
-| rankify-mixed | stable | 18% · 3.4 s | 9% · 4.2 s | 74% · 8.7 s |
-| rankify-mixed | exact | 59% · 4.0 s | 2% · 3.8 s | 39% · 9.0 s |
+| rankify-mixed | quick | 7% · 2.4 s | 10% · 3.6 s | 83% · 8.1 s |
+| rankify-mixed | stable | 18% · 3.4 s | 8% · 4.1 s | 75% · 8.7 s |
+| rankify-mixed | exact | 58% · 4.0 s | 2% · 4.0 s | 40% · 8.9 s |
 
 Rounds left (G7: the range holds the actual rounds left 70–90% of the time, the median is off by at most 25%). Forecasts made at rounds 0, 10, 25, 50, 100. Lists that ran out of budget add their known misses; their other forecasts can't be scored and are counted as "Unscored".
 
 | Method | Mode | Scored | Range held | Median off by (median) | "At least" | Unscored |
 |---|---|---|---|---|---|---|
-| rankify | quick | 80 | 39% | 100% | 0 | 0 |
-| rankify | stable | 100 | 14% | 85% | 0 | 0 |
-| rankify | exact | 100 | 0% | 106% | 80 | 0 |
-| rankify-mixed | quick | 41 | 22% | 183% | 0 | 0 |
-| rankify-mixed | stable | 62 | 29% | 164% | 0 | 0 |
-| rankify-mixed | exact | 100 | 38% | 95% | 0 | 0 |
+| rankify | quick | 80 | 18% | 84% | 0 | 0 |
+| rankify | stable | 100 | 13% | 73% | 0 | 0 |
+| rankify | exact | 100 | 0% | 121% | 0 | 0 |
+| rankify-mixed | quick | 41 | 2% | 140% | 0 | 0 |
+| rankify-mixed | stable | 62 | 21% | 126% | 0 | 0 |
+| rankify-mixed | exact | 100 | 58% | 51% | 0 | 0 |
 
 Kendall τ with the hidden scores (median; 1 = identical):
 
@@ -389,7 +391,7 @@ Wasted questions, up to the round where Exact was reached (or the whole budget):
 | Method | Already implied | Exact repeats | Stopped by itself |
 |---|---|---|---|
 | **rankify** | 16% | 5% | 20/20 |
-| **rankify-mixed** | 9% | 0% | 20/20 |
+| **rankify-mixed** | 7% | 0% | 20/20 |
 | elo | 81% | 58% | 0/20 |
 | elo-close | 83% | 75% | 0/20 |
 | glicko2 | 81% | 57% | 0/20 |
@@ -411,8 +413,8 @@ Measured on the final ranking of each list. Calibration error: how far stated Co
 | **rankify** | 20 | perfect | 0.039 | 100% |
 | **rankify-mixed** | 10 | human | 0.047 | 96% |
 | **rankify-mixed** | 10 | perfect | 0.038 | 100% |
-| **rankify-mixed** | 20 | human | 0.041 | 93% |
-| **rankify-mixed** | 20 | perfect | 0.032 | 100% |
+| **rankify-mixed** | 20 | human | 0.023 | 93% |
+| **rankify-mixed** | 20 | perfect | 0.033 | 100% |
 | glicko2 | 10 | human | 0.045 | 98% |
 | glicko2 | 10 | perfect | 0.151 | 100% |
 | glicko2 | 20 | human | 0.030 | 96% |
@@ -451,8 +453,8 @@ Median milliseconds per CLI call, in-process (real CLI code, no process start-up
 
 | Method | next | answer | show |
 |---|---|---|---|
-| **rankify** | 3.7 | 4.2 | 1.4 |
-| **rankify-mixed** | 7.0 | 4.6 | 1.4 |
+| **rankify** | 3.4 | 3.9 | 1.4 |
+| **rankify-mixed** | 5.3 | 4.4 | 1.4 |
 | elo | 1.3 | 2.4 | 1.2 |
 | elo-close | 2.3 | 2.3 | 1.2 |
 | glicko2 | 1.3 | 3.7 | 1.3 |
@@ -462,7 +464,7 @@ Median milliseconds per CLI call, in-process (real CLI code, no process start-up
 | just-sort-it (reference) | 2.4 | 4.6 | 1.3 |
 | insertion-sort (reference) | 1.4 | 1.5 | 1.2 |
 
-A real `rankify` subprocess (20 items, includes Python start-up): next 901 ms, answer 74 ms, show 71 ms.
+A real `rankify` subprocess (20 items, includes Python start-up): next 913 ms, answer 74 ms, show 70 ms.
 
 ## What each method offers
 

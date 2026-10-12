@@ -1,5 +1,6 @@
 """Ties the engine to the store. The CLI, the terminal UI and the tests all go through here."""
 
+import itertools
 import re
 import secrets
 from collections import Counter
@@ -554,9 +555,15 @@ class Rankify:
             "seed": derive_seed(lst.settings["seed"], r.upto_round_id or 0, 3),
             "timing": timing,
             "kinds": PAIRS_ONLY if _pairs_only(lst) else ALL_KINDS,
-            "habits": Habits(tie=float(np.exp(r.x[-1]))),  # the fit's Davidson weight
+            "habits": Habits(
+                tie=float(np.exp(r.x[-1])),  # the fit's Davidson weight
+                sharpness=_sharpness(
+                    store.answers_with_prior_fit(self.conn, lst.id, judge, SHARPNESS_ANSWERS)
+                ),
+            ),
             **_sittings(store.effective_rounds(self.conn, lst.id), judge),
             "sigma": r.params.get("sigma"),
+            "width_rest": _rest_spread(r.theta, r.theta_cov, [p for p, _, _ in r.ranks]),
         }
 
     def calibrate(self, slug: str) -> JudgeProfile:
@@ -952,6 +959,54 @@ def _looks(r: Refit) -> Counter:
 
 
 SITTING_GAP = timedelta(minutes=30)  # a longer pause starts a new sitting
+SHARPNESS_ANSWERS = 200  # the judge's latest answers that measure their sharpness
+SHARPNESS_SD = 0.5  # prior sd of its log: about 1, unless the answers say otherwise
+_SHARPNESS_GRID = np.exp(np.linspace(np.log(0.25), np.log(8.0), 57))
+
+
+def _rest_spread(theta: np.ndarray, cov: np.ndarray, active: list[int]) -> tuple[float, int]:
+    """The removed items' part of the fit's spread (sum of squared scores plus variances)
+    and their count. The fit learns its width over every item, removed ones too."""
+    rest = np.setdiff1d(np.arange(len(theta)), np.asarray(active, dtype=np.int64))
+    return float(theta[rest] @ theta[rest] + np.trace(cov[np.ix_(rest, rest)])), len(rest)
+
+
+def _sharpness(answers) -> float:
+    """How much more decisive the judge is than the model expects: a calibration slope (Cox
+    1958), from what rankify expected just before each answer. A judge the model describes
+    well comes out near 1; one who never contradicts themself, far above it.
+
+    Each answer is read as comparisons: a pair as one; an ordering as every pair in it,
+    since under Plackett–Luce the chance that a comes before b anywhere in the order is the
+    pair's own chance (neighbours alone would read a model-following judge as about 0.7);
+    a pick as the chosen item against each other one. Sets are weighted to count as as
+    many choices as they hold. With a sharpness k, the chance that w beats l, given that rankify thought
+    their gap was mu with variance v, is about sigmoid(k mu / sqrt(1 + pi k² v / 8))
+    (MacKay 1992), so an unsure expectation says little either way."""
+    mu, var, weight = [], [], []
+    for kind, shown, answer, before in answers:
+        if kind == "pair":
+            won = answer[0]
+            comparisons = [(won, next(i for i in shown if i != won))]
+            w = 1.0
+        elif kind == "pick":
+            comparisons = [(answer[0], i) for i in shown if i != answer[0]]
+            w = 1.0 / len(comparisons)
+        else:
+            comparisons = list(itertools.combinations(answer, 2))
+            w = 2.0 / len(answer)  # k - 1 choices' worth
+        for a, b in comparisons:
+            mu.append(before[a][0] - before[b][0])
+            var.append(before[a][1] ** 2 + before[b][1] ** 2)
+            weight.append(w)
+    if not mu:
+        return 1.0
+    m, v, w = (np.array(x)[None, :] for x in (mu, var, weight))
+    k = _SHARPNESS_GRID[:, None]
+    z = k * m / np.sqrt(1.0 + np.pi * k**2 * v / 8.0)
+    loglik = -(w * np.logaddexp(0.0, -z)).sum(axis=1)
+    prior = -0.5 * (np.log(_SHARPNESS_GRID) / SHARPNESS_SD) ** 2
+    return float(_SHARPNESS_GRID[np.argmax(loglik + prior)])
 
 
 def _sittings(rounds: list[store.RoundRow], judge: int, at: datetime | None = None) -> dict:

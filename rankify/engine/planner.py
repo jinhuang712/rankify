@@ -345,47 +345,44 @@ def _probit(x: np.ndarray) -> np.ndarray:
 
 
 @cache
-def _rank_layout(k: int) -> tuple[np.ndarray, list[tuple[np.ndarray, np.ndarray]]]:
-    """Every order of k items, and per stage (best of the rest) the scatter matrix that adds
-    a stage's (orders, m, m) blocks into a (k, k) matrix."""
-    perms = np.array(list(itertools.permutations(range(k))), dtype=np.int64)
-    stages = []
-    for r in range(k - 1):
-        rest = perms[:, r:]  # (orders, m)
-        m = k - r
-        flat = (rest[:, :, None] * k + rest[:, None, :]).reshape(-1)
-        scatter = np.zeros((len(flat), k * k))
-        scatter[np.arange(len(flat)), flat] = 1.0
-        stages.append((rest, scatter.reshape(len(perms), m, m, k * k)))
-    return perms, stages
+def _rank_layout(k: int) -> np.ndarray:
+    """Every order of k items, as rows of positions."""
+    return np.array(list(itertools.permutations(range(k))), dtype=np.int64)
 
 
 def _fisher(mu: np.ndarray, kind: str) -> np.ndarray:
     """Expected Fisher information of one answer about the shown items' scores, at ``mu``
     (sets, k). A pick is one softmax choice; a full order is k - 1 of them, averaged over
-    every order the judge could give under Plackett-Luce."""
+    every order the judge could give under Plackett-Luce. Each stage's choice probabilities
+    are laid out by item, so averaging a stage's diag(q) - q qᵀ over the orders is one
+    small matrix product."""
     c, k = mu.shape
     if kind == "pick" or k == 2:
         q = np.exp(mu - mu.max(axis=1, keepdims=True))
         q /= q.sum(axis=1, keepdims=True)
         return q[:, :, None] * np.eye(k) - q[:, :, None] * q[:, None, :]
-    perms, stages = _rank_layout(k)
+    perms = _rank_layout(k)
+    orders = np.arange(len(perms))[:, None]
     log_p = np.zeros((c, len(perms)))
-    blocks = []
-    for rest, scatter in stages:
+    by_item = []
+    for r in range(k - 1):
+        rest = perms[:, r:]  # (orders, m): the items not yet placed
         u = mu[:, rest]  # (sets, orders, m)
         top = u.max(axis=2, keepdims=True)
         q = np.exp(u - top)
         total = q.sum(axis=2, keepdims=True)
         q /= total
         log_p += u[:, :, 0] - (top + np.log(total))[:, :, 0]
-        m = rest.shape[1]
-        blocks.append((q[..., :, None] * np.eye(m) - q[..., :, None] * q[..., None, :], scatter))
+        full = np.zeros((c, len(perms), k))
+        full[:, orders, rest] = q
+        by_item.append(full)
     p = np.exp(log_p)  # P(order) for each set
-    f = np.zeros((c, k * k))
-    for block, scatter in blocks:
-        f += np.einsum("so,somn,omnf->sf", p, block, scatter, optimize=True)
-    return f.reshape(c, k, k)
+    f = np.zeros((c, k, k))
+    for full in by_item:
+        weighted = full * p[:, :, None]
+        f += weighted.sum(axis=1)[:, :, None] * np.eye(k)
+        f -= weighted.transpose(0, 2, 1) @ full
+    return f
 
 
 def set_gain(

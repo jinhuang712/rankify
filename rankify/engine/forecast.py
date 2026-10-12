@@ -40,7 +40,7 @@ from time import perf_counter
 import numpy as np
 
 from rankify.engine import stop
-from rankify.engine.fit import DEFAULT_SIGMA_PRIOR
+from rankify.engine.fit import DEFAULT_SIGMA_PRIOR, _best_log_sigma
 from rankify.engine.judge import HumanParams
 from rankify.engine.model import Prior
 from rankify.engine.planner import (
@@ -59,13 +59,14 @@ from rankify.engine.planner import (
     set_gain,
 )
 
-FORECAST_NAME = "adf-mixed-0.3"
+FORECAST_NAME = "adf-mixed-0.4"
 LOW_Q, HIGH_Q = 0.1, 0.9  # the range shown: 10th to 90th percentile
 _PROBIT = 1.702  # sigmoid(d) ~ Phi(d / 1.702)
 _WINDOW = 3  # candidate pairs: each item against the next few in the current order
 _DRAWS = 96  # posterior draws for Could be and relevance
 _ALL_PAIRS = 30  # above this many items, only pair each item with the next few
 _REFRESH = 4  # simulated rounds between fresh posterior draws
+_CAP_PER_ITEM = 50  # Exact on 20 items took about 25 rounds per item with the human judge
 _PAUSE_EVERY = 4  # simulated pair rounds between pauses of forecast_steps
 _SET_SEEDS = 1  # the real planner grows sets from two pairs; two changed little here
 _NODES16 = np.array([NormalDist().inv_cdf((k + 0.5) / 16) for k in range(16)])
@@ -79,6 +80,7 @@ class Habits:
     fatigue: float = HumanParams.fatigue  # noise grows by this share per call made...
     fatigue_cap: float = HumanParams.fatigue_cap  # ...up to this multiple
     tie: float = math.exp(Prior.tie_mean)  # Davidson's nu: "can't decide" between equals
+    sharpness: float = 1.0  # how much more decisive than the model expects
 
     def noise(self, effort: int) -> float:
         """The judge's noise after ``effort`` calls, as a multiple of a fresh judge's."""
@@ -275,11 +277,34 @@ def _tie_step(m: np.ndarray, s: np.ndarray, i: int, j: int, nu: float) -> None:
     _laplace(m, s, np.array([i, j]), loglik)
 
 
-class _Belief:
-    """One simulation's Gaussian belief, with posterior draws refreshed every few answers."""
+def _rewidth(m: np.ndarray, s: np.ndarray, old: float, new: float) -> None:
+    """Redo a Gaussian fit for prior width ``new`` instead of ``old``, with the same answers,
+    in place. The prior is Normal(0, width²) for every item, so the answers' precision is
+    the fit's precision minus 1/old², and their pull on the scores is precision times mean.
+    In the eigenbasis of the covariance this is a shift of each eigenvalue's inverse."""
+    w, v = np.linalg.eigh((s + s.T) / 2)
+    prec = 1.0 / np.clip(w, 1e-12, None)
+    pull = prec * (v.T @ m)
+    lam = np.clip(prec + 1.0 / new**2 - 1.0 / old**2, 1e-9, None)
+    m[:] = v @ (pull / lam)
+    s[:] = (v / lam) @ v.T
 
-    def __init__(self, m: np.ndarray, s: np.ndarray, rng: np.random.Generator):
-        self.m, self.s, self.rng = m, s, rng
+
+class _Belief:
+    """One simulation's Gaussian belief, with posterior draws refreshed every few answers.
+    With a ``sigma``, the prior width is learned again before each refresh, as the real fit
+    learns it after every answer (one EM step at a time; Dempster, Laird & Rubin 1977)."""
+
+    def __init__(
+        self,
+        m: np.ndarray,
+        s: np.ndarray,
+        rng: np.random.Generator,
+        sigma: float | None = None,
+        rest: tuple[float, int] = (0.0, 0),
+    ):
+        self.m, self.s, self.rng, self.sigma = m, s, rng, sigma
+        self.rest = rest  # removed items' spread and count, which the real fit counts too
         self._draws: _Draws | None = None
         self._age = 0
 
@@ -287,6 +312,23 @@ class _Belief:
         if fresh or self._draws is None or self._age >= _REFRESH:
             self._draws, self._age = _Draws(self.m, self.s, self.rng), 0
         return self._draws
+
+    def due(self) -> None:
+        """Before planning a round: learn the width again if fresh draws are due, so the
+        round is planned on one state throughout."""
+        if self.sigma and self._age >= _REFRESH:
+            self.relearn()
+
+    def relearn(self, steps: int = 3) -> None:
+        for _ in range(steps):
+            spread = float(self.m @ self.m + np.trace(self.s)) + self.rest[0]
+            n = len(self.m) + self.rest[1]
+            log_old = math.log(self.sigma)
+            new = math.exp(_best_log_sigma(spread, n, log_old, DEFAULT_SIGMA_PRIOR))
+            _rewidth(self.m, self.s, self.sigma, new)
+            self.sigma = new
+            if abs(math.log(new) - log_old) < 0.01:
+                break
 
     def pair(self, i: int, j: int, i_won: bool) -> None:
         _update(self.m, self.s, i, j, i_won)
@@ -413,17 +455,18 @@ class _Widths:
         else:
             self.root = v * np.sqrt(np.clip(w, 0.0, None))
 
-    def draw(self, rng: np.random.Generator) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """(true scores, starting mean, starting covariance) for one simulation."""
+    def draw(self, rng: np.random.Generator) -> tuple[np.ndarray, np.ndarray, np.ndarray, float]:
+        """(true scores, starting mean, starting covariance, width) for one simulation."""
         k = len(self.m0)
         if not self.sd:
-            return self.m0 + self.root @ rng.standard_normal(k), self.m0.copy(), self.s0.copy()
+            truth = self.m0 + self.root @ rng.standard_normal(k)
+            return truth, self.m0.copy(), self.s0.copy(), self.sigma
         wide = self.sigma * math.exp(self.sd * rng.standard_normal())
         lam = np.clip(self.prec + 1.0 / wide**2 - 1.0 / self.sigma**2, 1e-9, None)
         m = self.v @ (self.pull / lam)
         s = (self.v / lam) @ self.v.T
         truth = m + self.v @ (rng.standard_normal(k) / np.sqrt(lam))
-        return truth, m, (s + s.T) / 2
+        return truth, m, (s + s.T) / 2, wide
 
 
 def _width_sd(s0: np.ndarray, sigma: float) -> float:
@@ -460,6 +503,7 @@ def forecast_steps(
     effort: int = 0,
     past_efforts: Sequence[int] | None = None,
     sigma: float | None = None,
+    width_rest: tuple[float, int] = (0.0, 0),
     budget_ms: float = 800.0,
     min_sims: int = 8,
     max_sims: int = 64,
@@ -472,7 +516,8 @@ def forecast_steps(
     ``kinds`` are what the real planner uses. For fatigue, ``effort`` counts the calls the
     judge has made in the sitting under way (a ranking of k counts as k - 1), and
     ``past_efforts`` how far into its sitting each call behind the fit was made. ``sigma``
-    is the prior width the fit learned, if it learned one.
+    is the prior width the fit learned, if it learned one, and ``width_rest`` the removed
+    items' spread and count, which the fit also learns it from.
 
     Simulations run until ``max_sims``, or until ``budget_ms`` is spent and at least
     ``min_sims`` are done. Past twice the budget, the running simulation is cut short. A
@@ -483,7 +528,7 @@ def forecast_steps(
     habits = habits or Habits()
     pos = np.asarray(active, dtype=np.int64)
     k = len(pos)
-    cap = cap or 20 * max(k, 2)
+    cap = cap or _CAP_PER_ITEM * max(k, 2)
     if k < 2:
         return Forecast(0, 0, 0, None, 0, 0, 0.0)
     m0 = np.asarray(theta, dtype=float)[pos]
@@ -503,14 +548,16 @@ def forecast_steps(
     done: list[float] = []  # rounds, or infinity where a simulation was cut short
     lower: list[int] = []  # rounds reached by simulations cut short: at least that many left
     while len(done) < max_sims and not (len(done) >= min_sims and elapsed() > budget_ms):
-        truth, m1, s1 = widths.draw(rng)
-        belief, seen = _Belief(m1, s1, rng), looks0.copy()
+        truth, m1, s1, wide = widths.draw(rng)
+        belief = _Belief(m1, s1, rng, wide if sigma else None, width_rest)
+        seen = looks0.copy()
         m, s = belief.m, belief.s
         rounds, calls, cut = 0, effort, False
         while True:
             if rounds >= cap or (rounds % 16 == 0 and elapsed() > 2 * budget_ms):
                 cut = True
                 break
+            belief.due()
             order = np.argsort(-np.round(m, 9), kind="stable")
             # The real stop rules use the exact normal curve; an approximation here moved
             # the thresholds enough to stop simulations a round early, or run them long.
@@ -519,7 +566,7 @@ def forecast_steps(
             if planned is None:
                 break
             kind, items = planned
-            scale = past / habits.noise(calls)
+            scale = habits.sharpness * past / habits.noise(calls)
             if kind == "pair":
                 i, j = int(items[0]), int(items[1])
                 said = _answer_pair(truth, i, j, habits, scale, rng)

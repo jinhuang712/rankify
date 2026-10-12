@@ -174,6 +174,30 @@ Found in review and fixed before the final benchmark:
 - Fatigue counted every answer ever given on the list, so it never reset between sittings.
 - `forecast` and `report` always used the judge "me".
 
+**Follow-up 2 (2026-10-12): the open items.** Same [report](experiments/2026-10-12-forecast-mixed.md), rerun.
+
+What changed (see [DESIGN.md](DESIGN.md#rounds-left)):
+
+- The simulated fit learns its width again from the simulated answers, as the real fit does.
+- The simulated judge is as decisive as the real one has been: a calibration slope of their answers against what rankify expected before each.
+- A simulation may run to 50 rounds per item instead of 20, so long Exact sessions get a number instead of "at least".
+- The information of an ordering is computed stage by stage with each choice laid out by item: the same numbers, 2.3–2.8 times faster, so mixed forecasts run 6–25 simulations instead of 5–17.
+
+Against G7, human judge (10 and 20 items):
+
+- **Met:** pairs Stable (range held 73% and 72%, median off 16% and 18%); pairs Quick on 20 items (81%, 16%); mixed Stable (83% and 79%, off 18% and 20%).
+- **Just short:** pairs Quick on 10 items, range held 69% (median off 20%).
+- **Not met:** mixed Quick, where the median is off by 36% and 29% (from 42% and 41%), and mixed Exact (range held 68% and 55%, median off 31% and 24%). An earlier run of this follow-up, before the review fixes below, had mixed Quick on 20 items just inside (24%); reading orderings correctly for the judge's sharpness moved it back out.
+- **Pairs, Exact:** with 60 rounds per item every session finished; the range held 71% and 65%, the median off by 11% and 5%. With the usual 20 per item, 20-item sessions run out before they finish, so the main report can't score them.
+- **Fresh lists:** the low end of the range no longer drops far below the median ("89 (60–116)" where it was "72 (12–99)").
+- **Perfect judge:** not fixed (range held 0–58%, medians off 51–200%). Even when the forecast is told the judge is nearly perfect, it runs 33–97% long: with no contradictions, the real fit spreads the scores faster than the simulated fit.
+
+Found in review and fixed: the judge's sharpness read an ordering as its neighbouring pairs, which under Plackett–Luce makes a judge who follows the model look 25–45% less decisive; re-learning the width left out removed items, which the real fit counts; and the width could change halfway through planning a simulated round.
+
+Tried and dropped: predicting set times from the first few timed answers. Given the times each session ended up measuring, 20-item mixed forecasts would run 3% long on Quick instead of 16%. But the prediction from early answers didn't help, because much of the shift comes from the pair time, which mixed sessions measure last.
+
+Speed: unchanged for the planner (answer → next round at 200 items with mixed rounds: median 31 ms, p95 34 ms). In the terminal UI on a 20-item mixed list, a key reaches the UI within 1 ms while a forecast runs, and the next round is drawn 25 ms after the answer key (p95 31 ms).
+
 Why mixed forecasts still run high: real sessions shift toward orderings as the judge's measured times replace the guesses (on the benchmark's judge, ordering 4 items took 2.2–2.8 typical pairs against the guessed 3), and pair times stay at their default because mixed sessions ask so few pairs. The simulation can't foresee times not yet measured. In the forecast's own simulations, pairs are 25–40% of rounds; in real sessions, 8–16%.
 
 Speed: a mixed forecast fits about 5 to 15 simulations into its 0.8 s budget, against about 10 to 60 for pairs. In the terminal UI on a 20-item mixed list, a key reaches the UI within 11 ms while a forecast runs (median 0.5 ms), and the next round is drawn 26 ms after the answer key (p95 30 ms), the cost of planning sets, not of the forecast. (A headless test's "key to next round" reads about 0.9 s, but that is Textual's test pilot waiting up to a second for the process to go idle while the forecast keeps it busy.)

@@ -20,6 +20,7 @@ from rankify.engine.planner import (
     MIN_SET_SAMPLES,
     SET_TIME_GUESS,
     Timing,
+    _fisher,
     order_information,
     plan_round,
     set_gain,
@@ -140,6 +141,27 @@ def test_set_gain_matches_pair_information_and_ignores_settled_orders():
     picked = set_gain(np.zeros(3), np.eye(3), one_set, "pick", ones)
     assert settled[0] < 1e-3 and unsure[0] > 0.2
     assert 0 < picked[0] < unsure[0]  # picking the best says less than a full order
+
+
+@pytest.mark.parametrize("k", [3, 4, 5])
+def test_the_information_of_an_ordering_matches_a_plain_sum_over_every_order(k):
+    """``_fisher`` lays each stage's choice out by item to stay fast; check it against the
+    textbook sum: P(order) times the information of each of its k - 1 choices."""
+    import itertools
+
+    mu = np.random.default_rng(k).normal(0, 1.5, (2, k))
+    expected = np.zeros((2, k, k))
+    for s in range(2):
+        for order in itertools.permutations(range(k)):
+            p, info = 1.0, np.zeros((k, k))
+            for r in range(k - 1):
+                rest = list(order[r:])
+                q = np.exp(mu[s, rest] - mu[s, rest].max())
+                q /= q.sum()
+                p *= q[0]
+                info[np.ix_(rest, rest)] += np.diag(q) - np.outer(q, q)
+            expected[s] += p * info
+    np.testing.assert_allclose(_fisher(mu, "rank"), expected, atol=1e-12)
 
 
 def test_sets_never_hold_a_known_tie():

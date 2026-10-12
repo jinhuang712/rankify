@@ -77,6 +77,7 @@ CREATE TABLE IF NOT EXISTS rounds (
     created_at TEXT NOT NULL
 ) STRICT;
 CREATE INDEX IF NOT EXISTS rounds_list ON rounds(list_id, id);
+CREATE INDEX IF NOT EXISTS rounds_undoes ON rounds(undoes);
 
 CREATE TABLE IF NOT EXISTS fits (
     id INTEGER PRIMARY KEY,
@@ -628,6 +629,39 @@ def timing_samples(conn, list_id: int, judge: int) -> list[tuple[float, float]]:
         (list_id, judge),
     ).fetchall()
     return [(r["z"], r["ms"] / 1000.0) for r in rows]
+
+
+def answers_with_prior_fit(
+    conn, list_id: int, judge: int, limit: int
+) -> list[tuple[str, list[int], list[int], dict[int, tuple[float, float]]]]:
+    """The judge's latest ``limit`` answered rounds, oldest first, each with the shown items'
+    (score, sd) in the fit made just before it: what rankify expected when it asked."""
+    rows = conn.execute(
+        "SELECT r.kind, r.shown, r.answer, (SELECT f.id FROM fits f WHERE f.list_id = r.list_id"
+        " AND (f.upto_round_id < r.id OR f.upto_round_id IS NULL) ORDER BY f.id DESC LIMIT 1)"
+        " AS fit_id FROM rounds r WHERE r.list_id = ? AND r.judge_id = ?"
+        " AND r.outcome = 'answered' AND NOT EXISTS (SELECT 1 FROM rounds u"
+        " WHERE u.outcome = 'undo' AND u.undoes = r.id) ORDER BY r.id DESC LIMIT ?",
+        (list_id, judge, limit),
+    ).fetchall()
+    fit_ids = sorted({r["fit_id"] for r in rows if r["fit_id"] is not None})
+    scores: dict[tuple[int, int], tuple[float, float]] = {}
+    for start in range(0, len(fit_ids), 500):
+        chunk = fit_ids[start : start + 500]
+        marks = ",".join("?" * len(chunk))
+        for f in conn.execute(
+            f"SELECT fit_id, item_id, theta, sd FROM fit_items WHERE fit_id IN ({marks})"
+            " AND theta IS NOT NULL AND sd IS NOT NULL",
+            chunk,
+        ):
+            scores[(f["fit_id"], f["item_id"])] = (f["theta"], f["sd"])
+    out = []
+    for r in reversed(rows):
+        shown = json.loads(r["shown"])
+        before = {i: scores[(r["fit_id"], i)] for i in shown if (r["fit_id"], i) in scores}
+        if len(before) == len(shown):
+            out.append((r["kind"], shown, json.loads(r["answer"]), before))
+    return out
 
 
 def set_timing_samples(conn, list_id: int, judge: int) -> list[tuple[str, int, float]]:

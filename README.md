@@ -98,6 +98,7 @@ The books, papers and software that rankify builds on or measures itself against
 ### How people answer (the benchmark's human judge)
 
 - Moyer, R. S. & Landauer, T. K. (1967). Time required for judgements of numerical inequality. *Nature*. The distance effect: close calls take longer.
+- † Cox, D. R. (1958). [Two further applications of a model for binary regression](https://sugaku.net/oa/W2060374620). *Biometrika* 45(3–4). The calibration slope: the rounds-left forecast fits one to your answers against what rankify expected before each, to learn how decisive you are.
 - Wichmann, F. A. & Hill, N. J. (2001). The psychometric function: I. Fitting, sampling, and goodness of fit. *Perception & Psychophysics*. Lapses, the occasional answer given at random.
 
 ### Calibrating the human judge

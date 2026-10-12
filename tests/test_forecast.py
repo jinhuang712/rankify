@@ -10,11 +10,13 @@ from typer.testing import CliRunner
 
 from rankify import store
 from rankify.cli.main import app
-from rankify.engine.fit import DEFAULT_SIGMA_PRIOR, fit_pairs
+from rankify.engine.fit import DEFAULT_SIGMA_PRIOR, fit_pairs, fit_pairs_learning_sigma
 from rankify.engine.forecast import (
     Habits,
     _answer_pair,
+    _Belief,
     _choice_step,
+    _rewidth,
     _tie_step,
     _update,
     _width_sd,
@@ -23,7 +25,7 @@ from rankify.engine.forecast import (
 )
 from rankify.engine.model import A_WINS, Choices, Pairs, Prior
 from rankify.engine.planner import ALL_KINDS
-from rankify.service import _sittings
+from rankify.service import _sharpness, _sittings
 
 from .conftest import SimulatedJudge, run_rounds
 
@@ -117,6 +119,56 @@ def test_a_tired_judge_needs_more_rounds():
         )
 
     assert rounds(tired, 30) > 1.1 * rounds(fresh, 0)
+
+
+def test_the_simulated_fit_learns_its_width_as_the_real_one_does():
+    """Re-learning the width from a fit that has already learned it changes nothing, and
+    redoing a fit for the same width gives it back."""
+    rng = np.random.default_rng(3)
+    truth = rng.normal(0, 2.0, 12)
+    a, b, y = [], [], []
+    for _ in range(80):
+        i, j = rng.choice(12, 2, replace=False)
+        a.append(i)
+        b.append(j)
+        y.append(A_WINS if rng.random() < 1 / (1 + np.exp(truth[j] - truth[i])) else 1)
+    fit = fit_pairs_learning_sigma(12, Pairs.of(a, b, y), Prior(sigma=1.5), ties=False, bias=False)
+    m, s = fit.theta.copy(), fit.theta_cov.copy()
+    _rewidth(m, s, fit.sigma, fit.sigma)
+    np.testing.assert_allclose(m, fit.theta, atol=1e-12)
+    belief = _Belief(m, s, rng, fit.sigma)
+    belief.relearn(steps=10)
+    assert belief.sigma == pytest.approx(fit.sigma, rel=1e-6)
+    for start in (0.5, 4.0):  # from another width, it finds its way back
+        m2, s2 = fit.theta.copy(), fit.theta_cov.copy()
+        _rewidth(m2, s2, fit.sigma, start)
+        assert abs(m2 - fit.theta).max() > 0.1
+        belief = _Belief(m2, s2, rng, start)
+        belief.relearn(steps=200)
+        assert belief.sigma == pytest.approx(fit.sigma, rel=0.05)
+        np.testing.assert_allclose(m2, fit.theta, atol=0.05)
+
+
+def test_sharpness_is_about_1_for_a_judge_the_model_describes_and_more_for_a_perfect_one():
+    rng = np.random.default_rng(5)
+    model, perfect = [], []
+    for _ in range(300):
+        mu, sd = rng.normal(0, 1.5), 0.3
+        truth = rng.normal(mu, np.sqrt(2) * sd)  # the gap, drawn from what rankify expected
+        before = {1: (mu, sd), 2: (0.0, sd)}
+        won = 1 if rng.random() < 1 / (1 + np.exp(-truth)) else 2
+        model.append(("pair", [1, 2], [won], before))
+        perfect.append(("pair", [1, 2], [1 if truth > 0 else 2], before))
+    assert _sharpness([]) == 1.0
+    assert 0.8 < _sharpness(model) < 1.25
+    assert _sharpness(perfect) > 2.0
+    rankings = []  # orderings of 4 from a judge who follows the model exactly
+    for _ in range(600):
+        scores = rng.normal(0, 1.5, 4)
+        order = np.argsort(-(scores + rng.gumbel(size=4)))
+        before = {i: (float(scores[i]), 0.0) for i in range(4)}
+        rankings.append(("rank", [0, 1, 2, 3], [int(i) for i in order], before))
+    assert 0.85 < _sharpness(rankings) < 1.15
 
 
 def test_fatigue_resets_between_sittings():
