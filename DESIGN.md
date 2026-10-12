@@ -110,7 +110,7 @@ All data lives in one local SQLite file.
 
 The source of truth is a small set of tables: lists, items, judges and rounds. Each round records what was shown, in which order, the answer, how long it took, and its seed. Rounds are only ever added. An undo is a new round that cancels an earlier one. A removed item is hidden from the ranking, but its rounds stay in the fit, because they still say something about the other items.
 
-Everything else is derived and can be rebuilt: fits (scores and ranges after each round), plans (what the planner considered), forecasts and logs. Each derived row records which engine version made it and which rounds it used. `rankify verify` rebuilds the derived rows and checks that they match.
+Everything else is derived: fits (scores and ranges after each round), plans (what the planner considered), forecasts and logs. Each derived row records which engine version made it and which rounds it used. `rankify verify` rebuilds the latest fit from the answer log and checks that it matches; `rankify rebuild` replaces it with one made by the installed engine and drops saved forecasts. The fits made after each answer and the plans are kept as a record of what rankify believed and asked at the time; the rounds-left forecast reads them to learn how decisive the judge is. `rankify export` writes the list, its items and its rounds as JSON lines that stand on their own.
 
 ## Code layout
 

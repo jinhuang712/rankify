@@ -1,6 +1,7 @@
 """Ties the engine to the store. The CLI, the terminal UI and the tests all go through here."""
 
 import itertools
+import json
 import re
 import secrets
 from collections import Counter
@@ -119,6 +120,36 @@ class RankingView:
     tie_weight: float | None  # Davidson nu
     target_reached: bool | None = None  # None for methods without Confidence
     sigma: float | None = None  # learned prior width
+
+    def as_dict(self) -> dict:
+        return asdict(self)
+
+
+TIER_LEVEL = stop.STABLE_LEVEL  # a new tier starts below a gap this confident
+
+
+def tiers(items: list["RankedItem"]) -> list[list["RankedItem"]] | None:
+    """The ranking in tiers: a new tier starts wherever the item above is confidently better
+    (Confidence at least TIER_LEVEL, as Stable mode asks of its tiers). Inside a tier the
+    order is not settled yet. None for methods without Confidence."""
+    if any(i.confidence is None for i in items[:-1]):
+        return None
+    out: list[list[RankedItem]] = []
+    for k, item in enumerate(items):
+        if k == 0 or items[k - 1].confidence >= TIER_LEVEL:
+            out.append([])
+        out[-1].append(item)
+    return out
+
+
+@dataclass(frozen=True)
+class RebuildView:
+    list: str
+    engine_before: str | None  # the engine that made the latest fit, if any
+    engine_now: str
+    answers: int
+    moved: list[tuple[str, int, int]]  # (item, rank before, rank now)
+    forecasts_dropped: int
 
     def as_dict(self) -> dict:
         return asdict(self)
@@ -566,27 +597,124 @@ class Rankify:
             "width_rest": _rest_spread(r.theta, r.theta_cov, [p for p, _, _ in r.ranks]),
         }
 
-    def calibrate(self, slug: str) -> JudgeProfile:
-        """Estimate how this judge answers, from their rounds on one list."""
-        lst = self._list(slug)
+    def calibrate(self, slugs: str | Sequence[str]) -> JudgeProfile:
+        """Estimate how this judge answers, from their rounds on one or more lists. Pairs
+        measure the judge's accuracy, habits and pace; timed picks and orderings measure how
+        long sets take next to that pace."""
+        slugs = [slugs] if isinstance(slugs, str) else list(slugs)
         judge = store.judge_id(self.conn, self.judge)
-        ids = [it.id for it in store.items(self.conn, lst.id)]
-        pos = {iid: k for k, iid in enumerate(ids)}
-        a, b, y, seconds = [], [], [], []
-        for r in store.effective_rounds(self.conn, lst.id):
-            if r.kind != "pair" or r.judge_id != judge:
-                continue
-            first, second = r.shown
-            a.append(pos[first])
-            b.append(pos[second])
-            if r.outcome == "cant_decide":
-                y.append(TIE)
-            else:
-                y.append(A_WINS if r.answer[0] == first else B_WINS)
-            seconds.append(None if r.ms is None else r.ms / 1000.0)
+        a, b, y, seconds, sets = [], [], [], [], []
+        offset, planned = 0, False
+        for slug in slugs:
+            lst = self._list(slug)
+            planned |= not lst.settings.get("repeat_share")
+            ids = [it.id for it in store.items(self.conn, lst.id)]
+            pos = {iid: offset + k for k, iid in enumerate(ids)}
+            theta = None
+            for r in store.effective_rounds(self.conn, lst.id):
+                if r.judge_id != judge:
+                    continue
+                if r.kind == "pair":
+                    first, second = r.shown
+                    a.append(pos[first])
+                    b.append(pos[second])
+                    if r.outcome == "cant_decide":
+                        y.append(TIE)
+                    else:
+                        y.append(A_WINS if r.answer[0] == first else B_WINS)
+                    seconds.append(None if r.ms is None else r.ms / 1000.0)
+                elif r.outcome == "answered" and r.ms is not None:
+                    if theta is None:
+                        theta = self._current(lst).theta
+                    if theta is None:
+                        continue
+                    order = r.answer + [i for i in r.shown if i not in r.answer]
+                    local = {iid: k for k, iid in enumerate(ids)}
+                    scores = [float(theta[local[i]]) for i in order]
+                    sets.append((r.kind, scores, r.ms / 1000.0))
+            offset += len(ids)
         if len(y) < 20:
-            raise RankifyError(f"need at least 20 answers from '{self.judge}' to calibrate")
-        return estimate_profile(len(ids), a, b, y, seconds)
+            raise RankifyError(f"need at least 20 pair answers from '{self.judge}' to calibrate")
+        return estimate_profile(offset, a, b, y, seconds, set_rounds=sets, planned=planned)
+
+    def export(self, slug: str) -> list[dict]:
+        """The list as plain records: a header, every item, then every round, undos and
+        can't-decides included. Items are numbered from 1 in the order they were added, and
+        rounds refer to items and to the rounds they undo by number, so the log stands on
+        its own outside this database."""
+        lst = self._list(slug)
+        items = store.item_log(self.conn, lst.id)
+        number = {it["id"]: k for k, it in enumerate(items, start=1)}
+        judges = store.judge_names(self.conn)
+        rounds = store.round_log(self.conn, lst.id)
+        ordinal = {r["id"]: k for k, r in enumerate(rounds, start=1)}
+        out: list[dict] = [
+            {
+                "rankify": "export",
+                "format": 1,
+                "list": lst.slug,
+                "title": lst.title,
+                "settings": lst.settings,
+                "created_at": lst.created_at,
+                "engine_version": ENGINE_VERSION,
+            }
+        ]
+        for it in items:
+            out.append(
+                {
+                    "item": number[it["id"]],
+                    "name": it["name"],
+                    "note": it["note"],
+                    "attributes": None
+                    if it["attributes"] is None
+                    else json.loads(it["attributes"]),
+                    "added_at": it["added_at"],
+                    "removed_at": it["removed_at"],
+                }
+            )
+        for r in rounds:
+            out.append(
+                {
+                    "round": ordinal[r["id"]],
+                    "judge": judges[r["judge_id"]],
+                    "kind": r["kind"],
+                    "shown": [number[i] for i in r["shown"]],
+                    "answer": None if r["answer"] is None else [number[i] for i in r["answer"]],
+                    "outcome": r["outcome"],
+                    "undoes": ordinal.get(r["undoes"]),
+                    "ms": r["ms"],
+                    "seed": r["seed"],
+                    "engine_version": r["engine_version"],
+                    "created_at": r["created_at"],
+                }
+            )
+        return out
+
+    def rebuild(self, slug: str) -> RebuildView:
+        """Refit the list from its answer log alone, with this engine, and drop the saved
+        forecasts. The fits made after each answer, and the planner's records, stay as they
+        are: they record what rankify believed, and asked, at the time."""
+        lst = self._list(slug)
+        before = store.latest_fit(self.conn, lst.id)
+        with Transaction(self.conn):
+            dropped = store.delete_forecasts(self.conn, lst.id)
+            r = self._refit(lst, warm=False)
+        after = store.latest_fit(self.conn, lst.id)
+        names = {it.id: it.name for it in store.items(self.conn, lst.id)}
+        old = {} if before is None else {row.item_id: row.rank for row in before.items}
+        moved = [
+            (names[row.item_id], old[row.item_id], row.rank)
+            for row in after.items
+            if row.item_id in old and old[row.item_id] != row.rank
+        ]
+        return RebuildView(
+            lst.slug,
+            None if before is None else before.engine_version,
+            ENGINE_VERSION,
+            r.n_answers,
+            moved,
+            dropped,
+        )
 
     def verify(self, slug: str) -> list[str]:
         """Rebuild the latest fit from the answer log alone and compare. Returns problems found."""
@@ -598,7 +726,7 @@ class Rankify:
             return [
                 (
                     f"the stored fit was made by engine {stored.engine_version}, this is "
-                    f"{ENGINE_VERSION}; run `rankify show {slug}` to refit, then verify again"
+                    f"{ENGINE_VERSION}; run `rankify rebuild {slug}`, then verify again"
                 )
             ]
         problems = []
@@ -909,8 +1037,8 @@ class Rankify:
         self._fits[lst.id] = (key, r)
         return r
 
-    def _refit(self, lst: store.ListRow) -> Refit:
-        r = self._compute(lst, warm=True)
+    def _refit(self, lst: store.ListRow, warm: bool = True) -> Refit:
+        r = self._compute(lst, warm=warm)
         self._fits[lst.id] = (self._state_key(lst), r)
         store.insert_fit(
             self.conn,

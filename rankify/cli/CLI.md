@@ -5,10 +5,10 @@
 > - `new` (with `--method`, `--rounds` and `--calibrate`), `add`, `remove` and `lists`
 > - `next`: the rankify planner, with `--mode` to override the list's mode and an estimate of rounds left. It asks pairs, or with `new --rounds mixed` also picks and orderings of 3 to 5 items
 > - `answer`, `undo`, and `play`, the terminal UI
-> - `show`, `why`, `forecast` and `report`
-> - `verify`, `bench` and `calibrate`
+> - `show` (with `--tiers`), `why`, `forecast` and `report`
+> - `export`, `verify`, `rebuild`, `bench` and `calibrate`
 >
-> Still planned: `show --tiers`, `export`, `import` and `rebuild`. `next` exits with code 3 when the mode's target is reached or nothing is left worth asking. Every command that prints results takes `--json`.
+> Still planned: `import`, which comes with several judges in Phase 6. `next` exits with code 3 when the mode's target is reached or nothing is left worth asking. Every command that prints results takes `--json`.
 
 The CLI is the main way to use rankify, and also the way rankify is tested. The terminal UI, the simulator, the test suite and AI agents all drive the same commands.
 
@@ -91,7 +91,7 @@ For a pair or a pick, give one number: the better or the best item. For an order
 
 ```sh
 rankify show travel               # Score, Confidence, Could be
-rankify show travel --tiers       # grouped into tiers
+rankify show travel --tiers       # grouped into tiers whose order is settled
 rankify why travel --round 17     # why that round was asked
 rankify forecast travel           # rounds left, in the list's mode
 rankify report travel             # report for an AI agent, in Markdown
@@ -100,6 +100,8 @@ rankify report travel --format json
 
 `forecast` plays the rest of the session forward in simulation, about 10 to 60 times for a list of pairs and 6 to 25 times for a mixed list (see [DESIGN.md](../../DESIGN.md#rounds-left)), and gives the median and the 10–90% range of the rounds left. The simulation asks the same kinds of round the list does, and its judge takes your times, says "can't decide" as often as you have, tires as a sitting goes on, and is as decisive as your answers have been so far. `forecast` and `report` take `--judge` like `next`, since times and habits are each judge's own. It takes up to a second, and a forecast is saved and reused until the list changes. `next` shows the same estimate; `next --no-forecast` skips it. When too many simulations run out of time, the answer is "at least N rounds".
 
+`show --tiers` starts a new tier wherever the item above is confidently better (Confidence of at least 90%, as Stable mode asks of its tiers). Inside a tier the order isn't settled yet. `--json` adds a `tier` number to each item. Methods without Confidence, like Elo, have no tiers.
+
 `report` gives an agent what it needs to dig deeper: the ranking with Score, Confidence and Could be; confident ties; weak spots (close neighbours never compared directly); slow decisions; upsets the final scores can't explain; the judge's position bias and consistency; and with several judges, where they disagree.
 
 `why` lists the rounds the planner weighed, best first: pairs, picks and orderings. For each it shows the expected bits about the order of the shown items, counting only the pairs that matter for the mode, and the expected answer time. `--json` adds how likely the first item of a pair was to win, and the planner's time guesses for each kind and size of round. It works for rounds the planner chose. Calibration repeats, undos and baseline methods have no plan to show.
@@ -107,11 +109,16 @@ rankify report travel --format json
 ## Manage data
 
 ```sh
-rankify export travel > travel.jsonl              # the answer log, one round per line
+rankify export travel > travel.jsonl              # the list, its items and every round
+rankify export travel --out backup/travel.jsonl
 rankify import travel friend.jsonl --judge alex   # merge another judge's log (Phase 6)
-rankify verify travel             # rebuild everything from the log and compare
-rankify rebuild travel            # rebuild derived data after an engine upgrade
+rankify verify travel             # rebuild the ranking from the log and compare
+rankify rebuild travel            # refit with this version of rankify, after an upgrade
 ```
+
+`export` writes JSON lines: first the list (title and settings), then one line per item, numbered from 1 in the order they were added (removed ones included, with when they were removed), then one line per round, undos and "can't decide" included, with the judge, the answer and its time. Rounds refer to items, and an undo to the round it cancels, by number, so the file stands on its own. Replaying it into an empty database gives the same ranking. Unanswered rounds and the planner's notes are left out; they are derived.
+
+`rebuild` refits the list from its answer log alone with the installed version of rankify, drops the saved forecasts, and lists the items that moved. The fits made after each answer, and the planner's records, stay as they were: they record what rankify believed, and asked, at the time. `show` also refits on its own when the engine changes; `rebuild` is the way to see what changed.
 
 ## Benchmark
 
@@ -139,10 +146,13 @@ Glicko-2, TrueSkill and openskill need the development dependencies (`uv sync`).
 rankify new calib "Places I want to go" --items places.txt --calibrate
 rankify play calib --rounds 150
 rankify calibrate calib --out ~/.rankify/judge-me.json
+rankify calibrate calib places food --out ~/.rankify/judge-me.json   # several lists
 rankify bench --judge-profile ~/.rankify/judge-me.json
 ```
 
-`--calibrate` makes about 15% of rounds repeat an earlier pair with the sides swapped. That measures how consistent you are. `calibrate` then estimates how you answer and marks each setting as measured or kept as the default guess, depending on how many answers the session has. `bench --judge-profile` uses only the measured settings. The method is described in [EXPERIMENT.md](../../EXPERIMENT.md#part-2-calibration-and-pilot).
+`--calibrate` makes about 15% of rounds repeat an earlier pair with the sides swapped. That measures how consistent you are. `calibrate` then estimates how you answer and marks each setting as measured or kept as the default guess, depending on how many answers the session has. `bench --judge-profile` uses only the measured settings.
+
+With several lists, the pairs from all of them are pooled, and timed picks and orderings measure how long sets take next to your pace on pairs: real time over the time the benchmark's judge would take, whose median becomes `set_time_scale` once 8 or more are timed. On simulated judges it reads about 10% low, which still tells half, guessed and double time apart. Pairs from ordinary lists were chosen by the planner, which leans toward close calls; the profile notes that the bias corrections assume random pairs. The method is described in [EXPERIMENT.md](../../EXPERIMENT.md#part-2-calibration-and-pilot).
 
 ## JSON output
 

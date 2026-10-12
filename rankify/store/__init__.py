@@ -250,6 +250,32 @@ def items(conn, list_id: int) -> list[ItemRow]:
     return [ItemRow(r["id"], r["name"], r["note"], r["removed_at"]) for r in rows]
 
 
+def item_log(conn, list_id: int) -> list[dict]:
+    """Every item of the list with its notes and dates, in insert order."""
+    rows = conn.execute(
+        "SELECT id, name, note, attributes, added_at, removed_at FROM items WHERE list_id = ?"
+        " ORDER BY id",
+        (list_id,),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def round_log(conn, list_id: int) -> list[dict]:
+    """Every round of the list, undos and can't-decides included, oldest first."""
+    rows = conn.execute("SELECT * FROM rounds WHERE list_id = ? ORDER BY id", (list_id,))
+    out = []
+    for r in rows.fetchall():
+        d = dict(r)
+        d["shown"] = json.loads(d["shown"])
+        d["answer"] = None if d["answer"] is None else json.loads(d["answer"])
+        out.append(d)
+    return out
+
+
+def delete_forecasts(conn, list_id: int) -> int:
+    return conn.execute("DELETE FROM forecasts WHERE list_id = ?", (list_id,)).rowcount
+
+
 def mark_removed(conn, item_id: int) -> None:
     conn.execute(
         "UPDATE items SET removed_at = ? WHERE id = ? AND removed_at IS NULL", (now(), item_id)

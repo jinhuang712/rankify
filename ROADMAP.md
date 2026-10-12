@@ -206,6 +206,8 @@ Speed: a mixed forecast fits about 5 to 15 simulations into its 0.8 s budget, ag
 
 **Done early (2026-10-12):** the calibration tools are built: `new --calibrate`, a minimal `play`, `calibrate`, and `bench --judge-profile`. The first real calibration session comes next, before Phase 2.
 
+**Ready for the pilot (2026-10-12):** `calibrate` learns from several lists at once and measures how long picks and orderings take next to the judge's pace on pairs (`set_time_scale`, used by `bench --judge-profile`). On simulated judges it reads about 10% low. `export` writes a list as JSON lines, as a backup; `rebuild` refits after an upgrade and shows what moved; `show --tiers` groups the ranking into settled tiers.
+
 - Rank three real lists: travel (about 20 items), products (about 10) and restaurants (about 15).
 - Replace the timing guesses with measured times, and rerun the Phase 3 comparison.
 - Fix whatever feels wrong.

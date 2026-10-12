@@ -15,6 +15,7 @@ from rankify.service import (
     RankifyError,
     RankingView,
     RoundView,
+    tiers,
 )
 
 DEFAULT_DB = Path.home() / ".rankify" / "rankify.db"
@@ -313,8 +314,8 @@ def undo(ctx: typer.Context, slug: Slug, as_json: JsonOpt = False, judge: JudgeO
 # ---------------------------------------------------------------- results
 
 
-def _ranking_json(view: RankingView) -> dict:
-    return {
+def _ranking_json(view: RankingView, with_tiers: bool = False) -> dict:
+    out = {
         "list": view.list,
         "title": view.title,
         "mode": view.mode,
@@ -335,6 +336,13 @@ def _ranking_json(view: RankingView) -> dict:
             for i in view.items
         ],
     }
+    if with_tiers:
+        groups = tiers(view.items)
+        if groups is not None:
+            tier_of = {i.id: t for t, group in enumerate(groups, start=1) for i in group}
+            for item in out["items"]:
+                item["tier"] = tier_of[item["id"]]
+    return out
 
 
 def _print_ranking(view: RankingView) -> None:
@@ -358,16 +366,86 @@ def _print_ranking(view: RankingView) -> None:
 
 
 @app.command()
-def show(ctx: typer.Context, slug: Slug, as_json: JsonOpt = False) -> None:
+def show(
+    ctx: typer.Context,
+    slug: Slug,
+    as_json: JsonOpt = False,
+    by_tier: Annotated[
+        bool, typer.Option("--tiers", help="Group items into tiers whose order is settled.")
+    ] = False,
+) -> None:
     """Show the current ranking."""
     try:
         view = _service(ctx).ranking(slug)
     except RankifyError as e:
         _fail(str(e))
     if as_json:
-        _emit_json(_ranking_json(view))
+        _emit_json(_ranking_json(view, with_tiers=by_tier))
+    elif by_tier:
+        _print_tiers(view)
     else:
         _print_ranking(view)
+
+
+def _print_tiers(view: RankingView) -> None:
+    groups = tiers(view.items)
+    if groups is None:
+        _fail(f"tiers need Confidence, which method {view.method} doesn't give")
+    plural = "" if view.answers == 1 else "s"
+    typer.echo(f"{view.title} · {view.mode} · {view.answers} answer{plural}\n")
+    typer.echo(
+        "A new tier starts where the item above is confidently better (90%). "
+        "Inside a tier the order isn't settled yet.\n"
+    )
+    for t, group in enumerate(groups, start=1):
+        ranks = f"#{group[0].rank}" if len(group) == 1 else f"#{group[0].rank}–#{group[-1].rank}"
+        typer.echo(f" Tier {t} ({ranks}): " + ", ".join(i.name for i in group))
+
+
+@app.command()
+def export(
+    ctx: typer.Context,
+    slug: Slug,
+    out: Annotated[
+        Path | None, typer.Option("--out", help="Write to this file instead of the screen.")
+    ] = None,
+) -> None:
+    """Write the list, its items and every round as JSON lines: a backup, and a log
+    another rankify can read."""
+    try:
+        records = _service(ctx).export(slug)
+    except RankifyError as e:
+        _fail(str(e))
+    text = "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in records)
+    if out is None:
+        typer.echo(text, nl=False)
+        return
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(text, encoding="utf-8")
+    rounds = sum(1 for r in records if "round" in r)
+    typer.echo(f"Wrote {slug}: {len(records) - rounds - 1} items and {rounds} rounds to {out}.")
+
+
+@app.command()
+def rebuild(ctx: typer.Context, slug: Slug, as_json: JsonOpt = False) -> None:
+    """Refit the list from its answer log with this version of rankify, and drop saved
+    forecasts. Use it after an upgrade; it shows which items moved."""
+    try:
+        view = _service(ctx).rebuild(slug)
+    except RankifyError as e:
+        _fail(str(e))
+    if as_json:
+        _emit_json(view.as_dict())
+        return
+    before = view.engine_before or "none"
+    typer.echo(
+        f"Rebuilt {view.list} from {view.answers} answers with engine {view.engine_now} "
+        f"(the last fit was made by {before}); dropped {view.forecasts_dropped} saved forecasts."
+    )
+    if not view.moved:
+        typer.echo("The ranking didn't change.")
+    for name, was, now in view.moved:
+        typer.echo(f"  {name}: #{was} -> #{now}")
 
 
 @app.command()
@@ -641,21 +719,30 @@ def play(
 @app.command()
 def calibrate(
     ctx: typer.Context,
-    slug: Slug,
+    slugs: Annotated[
+        list[str], typer.Argument(help="One or more lists to learn from, like 'travel food'.")
+    ],
     out: Annotated[
         Path | None, typer.Option("--out", help="Write the judge profile (JSON) to this file.")
     ] = None,
     as_json: JsonOpt = False,
     judge: JudgeOpt = "me",
 ) -> None:
-    """Estimate how you answer, from your rounds on a list, for the benchmark's human judge."""
+    """Estimate how you answer, from your rounds on one or more lists, for the benchmark's
+    human judge. Pairs give accuracy, habits and pace; timed picks and orderings give how
+    long sets take next to that pace."""
     from datetime import date
 
     try:
-        profile = _service(ctx, judge).calibrate(slug)
+        profile = _service(ctx, judge).calibrate(slugs)
     except RankifyError as e:
         _fail(str(e))
-    data = {"list": slug, "judge": judge, "date": date.today().isoformat(), **profile.as_dict()}
+    data = {
+        "list": ",".join(slugs),
+        "judge": judge,
+        "date": date.today().isoformat(),
+        **profile.as_dict(),
+    }
     if out:
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(json.dumps(data, indent=2), encoding="utf-8")
@@ -683,6 +770,11 @@ def calibrate(
         ("Answer time, easy pairs", f"{p.base_seconds:.1f} s", tag("base_seconds")),
         ("Extra on close calls", f"+{p.close_seconds:.1f} s", tag("close_seconds")),
         ("Fatigue", f"noise +{p.fatigue:.1%} per round", tag("fatigue")),
+        (
+            "Picks and orderings",
+            f"{p.set_time_scale:.2f} x the guessed time ({p.set_answers} timed)",
+            tag("set_time_scale"),
+        ),
     ]
     typer.echo(f"Judge profile for '{judge}' from {p.answers} answers on {p.items} items:\n")
     for label, value, status in rows:

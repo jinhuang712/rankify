@@ -12,10 +12,17 @@ estimates are corrected with a parametric bootstrap: simulate sessions like the 
 own from the first estimates, run the same estimator on them, and subtract the bias it
 shows (Efron & Tibshirani 1993, ch. 10).
 
+Picks and orderings are timed against the same model the benchmark's judge uses for them
+(one call per neighbour in the judge's order for an ordering; the call between the best
+two plus half an easy call per other item for a pick), with the judge's own pair pace.
+The median of real time over modelled time is the judge's ``set_time_scale``. In
+simulation it reads about 10% low, because the fitted gaps are noisy.
+
 One session still gives rough numbers. The profile keeps the evidence (answer count,
 repeats) and notes next to the estimates, so nobody reads more precision into them.
 """
 
+import itertools
 import math
 from collections import Counter
 from dataclasses import asdict, dataclass, field, replace
@@ -105,6 +112,9 @@ class JudgeProfile:
     repeat_disagreement: float | None
     repeat_disagreement_expected: float | None
     bootstrap_sessions: int
+    set_time_scale: float = 1.0  # picks and orderings, against the guessed time model
+    set_answers: int = 0  # timed picks and orderings behind it
+    set_seconds: dict = field(default_factory=dict)  # median seconds, by kind and size
     measured: list[str] = field(default_factory=list)  # settings this session could measure
     notes: list[str] = field(default_factory=list)
 
@@ -130,6 +140,7 @@ MIN_ANSWERS = {
     "fatigue": 300,
 }
 NOT_YET_MEASURABLE = ("first_bonus", "lapse")  # too noisy even at 400 answers
+MIN_SET_ANSWERS = 8  # timed picks and orderings before set_time_scale counts as measured
 # Settings whose direct estimate is biased by noisy gaps, so the bootstrap corrects them.
 _CORRECTED = ("tie_peak", "tie_width", "close_seconds", "close_width", "accuracy")
 
@@ -150,13 +161,25 @@ _RANGES = {
 
 
 def estimate_profile(
-    n: int, a, b, y, seconds, *, bootstrap: int = 30, seed: int = 0
+    n: int,
+    a,
+    b,
+    y,
+    seconds,
+    *,
+    set_rounds=(),
+    planned: bool = False,
+    bootstrap: int = 30,
+    seed: int = 0,
 ) -> JudgeProfile:
-    """Estimate a judge profile from one judge's pair rounds on one list, in log order.
+    """Estimate a judge profile from one judge's pair rounds, in log order.
 
     ``a``/``b`` are the positions of the items shown first/second, ``y`` is A_WINS, B_WINS or
-    TIE, and ``seconds`` is each answer's time (or None when unknown). ``bootstrap`` simulated
-    sessions correct the bias of the direct estimates; 0 turns the correction off.
+    TIE, and ``seconds`` is each answer's time (or None when unknown). ``set_rounds`` holds
+    (kind, the shown items' fitted scores in the judge's order with the chosen item first,
+    seconds) for timed picks and orderings. ``planned`` says some pairs were chosen by the
+    planner rather than at random. ``bootstrap`` simulated sessions correct the bias of the
+    direct estimates; 0 turns the correction off.
     """
     a, b, y = (np.asarray(v, dtype=np.int64) for v in (a, b, y))
     m = len(y)
@@ -197,6 +220,33 @@ def estimate_profile(
         notes.append('Fewer than 3 "can\'t decide" answers, so the tie settings keep the guess.')
     if raw["repeats"] < 10:
         notes.append(f"Only {raw['repeats']} repeated pairs: the consistency check is weak.")
+    if planned:
+        notes.append(
+            "Some pairs were chosen by the planner, which leans toward close calls; the bias "
+            "corrections assume random pairs, so take the close-call and can't-decide settings "
+            "as rough."
+        )
+    # Timed against the pace the benchmark's judge will use: measured settings where this
+    # session measured them, the guesses elsewhere, so the scale fits the judge it scales.
+    pace = {
+        k: est[k] if k in measured else getattr(HumanParams(), k)
+        for k in ("base_seconds", "close_seconds", "close_width")
+    }
+    scale, set_answers, set_seconds = estimate_set_time_scale(
+        set_rounds, pace["base_seconds"], pace["close_seconds"], pace["close_width"]
+    )
+    if set_answers >= MIN_SET_ANSWERS:
+        measured.append("set_time_scale")
+        if raw["timed"] < 20:
+            notes.append(
+                "Picks and orderings are timed against the guessed pair pace, because few pairs "
+                "were timed."
+            )
+    elif set_rounds:
+        notes.append(
+            f"Only {set_answers} timed picks and orderings: set_time_scale keeps the guess "
+            f"(needs {MIN_SET_ANSWERS})."
+        )
     if raw["timed"] < 20:
         notes.append("Few timed answers: the time settings keep the guess.")
     elif est["base_seconds"] + est["close_seconds"] > 15:
@@ -222,9 +272,36 @@ def estimate_profile(
         repeat_disagreement=raw["repeat_observed"],
         repeat_disagreement_expected=raw["repeat_expected"],
         bootstrap_sessions=bootstrap,
+        set_time_scale=scale,
+        set_answers=set_answers,
+        set_seconds=set_seconds,
         measured=measured,
         notes=notes,
     )
+
+
+def estimate_set_time_scale(set_rounds, base: float, close: float, width: float):
+    """(set_time_scale, timed set rounds used, median seconds by "kind size") from timed
+    picks and orderings. Scores are the list's fitted scores, converted to benchmark units."""
+
+    def call(gap: float) -> float:
+        return base + close * math.exp(-abs(gap) / width)
+
+    ratios, by_size = [], {}
+    for kind, scores, sec in set_rounds:
+        if not 0.2 < sec < 3 * MAX_SECONDS:
+            continue
+        s = [v * LOGISTIC_TO_NORMAL for v in scores]
+        if kind == "rank":
+            modelled = sum(call(x - y) for x, y in itertools.pairwise(s))
+        else:
+            modelled = call(s[0] - max(s[1:])) + 0.5 * base * (len(s) - 2)
+        ratios.append(sec / modelled)
+        by_size.setdefault(f"{kind} {len(s)}", []).append(sec)
+    if not ratios:
+        return 1.0, 0, {}
+    medians = {k: float(np.median(v)) for k, v in sorted(by_size.items())}
+    return float(np.median(ratios)), len(ratios), medians
 
 
 def simulate_session(n: int, m: int, params: HumanParams, spread: float, rng):

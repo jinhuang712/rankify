@@ -100,7 +100,7 @@ def test_report_command_prints_markdown_or_json(tmp_path):
 # Commands that print results. `play` is interactive and `bench` writes a Markdown report.
 RESULT_COMMANDS = (
     "new", "add", "remove", "lists", "next", "answer", "undo", "show", "verify", "why",
-    "report", "forecast", "calibrate",
+    "report", "forecast", "calibrate", "rebuild",
 )  # fmt: skip
 
 
