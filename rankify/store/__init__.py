@@ -298,6 +298,7 @@ class RoundRow:
     outcome: str
     undoes: int | None
     ms: int | None = None  # time from question to answer
+    created_at: str | None = None  # when the answer was saved
 
 
 def insert_query(conn, list_id, judge, seq, kind, shown, seed, planner, engine_version) -> QueryRow:
@@ -384,6 +385,7 @@ def effective_rounds(conn, list_id: int) -> list[RoundRow]:
             r["outcome"],
             r["undoes"],
             r["ms"],
+            r["created_at"],
         )
         for r in rows
     ]

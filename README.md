@@ -72,6 +72,7 @@ The books, papers and software that rankify builds on or measures itself against
 - Bradley, R. A. & Terry, M. E. (1952). Rank analysis of incomplete block designs: the method of paired comparisons. *Biometrika*. The pair model at rankify's core.
 - Luce, R. D. (1959). *Individual Choice Behavior: A Theoretical Analysis*. Wiley. The choice axiom behind "pick the best of these".
 - Plackett, R. L. (1975). The analysis of permutations. *Applied Statistics*. Extends the model to full orderings ("put these in order").
+- † Yellott, J. I. (1977). [The relationship between Luce's choice axiom, Thurstone's theory of comparative judgment, and the double exponential distribution](https://swov.nl/en/publicatie/relationship-between-luces-choice-axiom-thurstones-theory-comparitive-judgment-and). *Journal of Mathematical Psychology* 15. Luce's model is what you get by adding Gumbel noise to each score and taking the best; the rounds-left forecast draws simulated picks and orderings this way.
 - Davidson, R. R. (1970). On extending the Bradley–Terry model to accommodate ties in paired comparison experiments. *Journal of the American Statistical Association*. How rankify counts "can't decide".
 - Debreu, G. (1960). Review of R. D. Luce, *Individual Choice Behavior*. *American Economic Review*. Shows how near-identical options break Luce's axiom.
 - Tversky, A. (1972). Elimination by aspects: a theory of choice. *Psychological Review*. Explains why similar items split votes.

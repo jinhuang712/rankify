@@ -2,6 +2,7 @@
 
 import json
 import math
+from datetime import UTC, datetime, timedelta
 
 import numpy as np
 import pytest
@@ -9,9 +10,20 @@ from typer.testing import CliRunner
 
 from rankify import store
 from rankify.cli.main import app
-from rankify.engine.fit import fit_pairs
-from rankify.engine.forecast import _update, forecast_rounds, forecast_steps
-from rankify.engine.model import A_WINS, Pairs, Prior
+from rankify.engine.fit import DEFAULT_SIGMA_PRIOR, fit_pairs
+from rankify.engine.forecast import (
+    Habits,
+    _answer_pair,
+    _choice_step,
+    _tie_step,
+    _update,
+    _width_sd,
+    forecast_rounds,
+    forecast_steps,
+)
+from rankify.engine.model import A_WINS, Choices, Pairs, Prior
+from rankify.engine.planner import ALL_KINDS
+from rankify.service import _sittings
 
 from .conftest import SimulatedJudge, run_rounds
 
@@ -31,6 +43,94 @@ def test_one_answer_moves_the_belief_to_the_exact_posterior_mean():
     fit = fit_pairs(3, Pairs.of([0], [1], [A_WINS]), prior, ties=False, bias=False)
     np.testing.assert_allclose(m, fit.theta, atol=0.15)
     np.testing.assert_allclose(np.diag(s), np.diag(fit.theta_cov), atol=0.15)
+
+
+@pytest.mark.parametrize(
+    ("sigma", "shown", "answer"),
+    [
+        (1.5, [0, 1, 2, 3], [2, 0, 3, 1]),  # put these in order
+        (2.5, [0, 1, 2, 3, 4], [4]),  # a pick, under wide uncertainty
+    ],
+)
+def test_a_set_answer_moves_the_belief_to_the_full_refit(sigma, shown, answer):
+    """From the prior, the update is the same posterior mode and Laplace covariance as a
+    full refit of the same answer under Plackett–Luce, even when the answer surprises."""
+    prior = Prior(sigma=sigma)
+    m, s = np.zeros(6), np.eye(6) * sigma**2
+    _choice_step(m, s, np.array(shown), np.array(answer))
+    fit = fit_pairs(6, Pairs.of([], [], []), prior, ties=False, bias=False,
+                    choices=Choices.of([(shown, answer)]))  # fmt: skip
+    np.testing.assert_allclose(m, fit.theta, atol=1e-6)
+    np.testing.assert_allclose(s, fit.theta_cov, atol=1e-6)
+    assert m[5] == 0
+
+
+def test_cant_decide_pulls_two_items_together_without_flipping_them():
+    """The mode of a "can't decide" under wide uncertainty, checked on a fine grid. A single
+    Newton step from the mean used to overshoot here and swap the two items."""
+    nu, v = 0.2, 12.0
+    m, s = np.array([1.5, -1.5, 0.0]), np.eye(3) * v
+    _tie_step(m, s, 0, 1, nu)
+    grid = np.linspace(-6, 6, 1201)
+    ua, ub = np.meshgrid(grid, grid, indexing="ij")
+    tie = np.log(nu) + (ua + ub) / 2
+    log_post = tie - np.logaddexp(np.logaddexp(ua, ub), tie)
+    log_post -= ((ua - 1.5) ** 2 + (ub + 1.5) ** 2) / (2 * v)
+    a, b = np.unravel_index(np.argmax(log_post), log_post.shape)
+    assert m[0] - m[1] == pytest.approx(grid[a] - grid[b], abs=0.03)
+    assert 0 < m[0] - m[1] < 3.0 and s[0, 0] < v and m[2] == 0.0
+
+
+def test_cant_decide_comes_at_davidsons_rate():
+    rng = np.random.default_rng(1)
+    truth, nu = np.zeros(2), 0.5
+    said = [_answer_pair(truth, 0, 1, Habits(tie=nu), 1.0, rng) for _ in range(20000)]
+    assert np.mean(np.array(said) == 0) == pytest.approx(nu / (2 + nu), abs=0.01)
+
+
+def test_the_width_is_as_unsure_as_its_hyperprior_before_any_answers():
+    assert _width_sd(np.eye(6) * 1.5**2, 1.5) == pytest.approx(DEFAULT_SIGMA_PRIOR.sd)
+    assert _width_sd(np.eye(6) * 0.1, 1.5) < 0.35  # every item pinned down
+
+
+def test_orderings_finish_in_fewer_rounds_than_pairs():
+    theta, cov = np.zeros(10), np.eye(10) * 2.25
+    pairs = forecast_rounds("stable", theta, cov, list(range(10)), {}, 3, **FIXED)
+    mixed = forecast_rounds("stable", theta, cov, list(range(10)), {}, 3, kinds=ALL_KINDS,
+                            **FIXED)  # fmt: skip
+    assert mixed.median < pairs.median
+
+
+def test_a_tired_judge_needs_more_rounds():
+    """Tiredness only: the same list, a fresh judge against one already 30 calls into a
+    sitting whose noise grows 2% per call, over several seeds."""
+    theta, cov = np.linspace(2, -2, 8), np.eye(8) * 2.25
+    looks = dict.fromkeys(range(8), 2)
+    fresh = Habits(fatigue=0.0)
+    tired = Habits(fatigue=0.02)
+
+    def rounds(habits, effort):
+        kw = {"habits": habits, "effort": effort, "past_efforts": [], **FIXED}
+        return sum(
+            forecast_rounds("exact", theta, cov, list(range(8)), looks, seed, **kw).median
+            for seed in range(4)
+        )
+
+    assert rounds(tired, 30) > 1.1 * rounds(fresh, 0)
+
+
+def test_fatigue_resets_between_sittings():
+    def row(minute, judge=1, shown=(1, 2)):
+        at = datetime(2026, 1, 1, tzinfo=UTC) + timedelta(minutes=minute)
+        return store.RoundRow(0, judge, None, "pair", list(shown), None, "answered", None, 1000,
+                              at.isoformat())  # fmt: skip
+
+    rounds = [row(0), row(1), row(2, shown=(1, 2, 3, 4)), row(90), row(91, judge=2)]
+    out = _sittings(rounds, 1, at=datetime(2026, 1, 1, 1, 32, tzinfo=UTC))
+    assert out["past_efforts"] == [0, 1, 2, 3, 4, 0, 0]  # a ranking of 4 is 3 calls
+    assert out["effort"] == 1  # judge 1's second sitting, under way
+    later = _sittings(rounds, 1, at=datetime(2026, 1, 1, 3, 0, tzinfo=UTC))
+    assert later["effort"] == 0  # a new sitting
 
 
 def test_a_settled_list_has_no_rounds_left():

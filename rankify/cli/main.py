@@ -234,12 +234,16 @@ def next_(
 
 @app.command()
 def forecast(
-    ctx: typer.Context, slug: Slug, mode: ModeOpt = None, as_json: JsonOpt = False
+    ctx: typer.Context,
+    slug: Slug,
+    mode: ModeOpt = None,
+    as_json: JsonOpt = False,
+    judge: JudgeOpt = "me",
 ) -> None:
     """Estimate how many rounds are left until the mode's target, by simulating the rest of
-    the session."""
+    the session with this judge's times and habits."""
     try:
-        f = _service(ctx).forecast(slug, mode)
+        f = _service(ctx, judge).forecast(slug, mode)
     except RankifyError as e:
         _fail(str(e))
     if as_json:
@@ -253,8 +257,6 @@ def forecast(
         typer.echo("No forecast: only lists ranked by rankify's planner have one.")
         return
     typer.echo(f"{f.mode.capitalize()}: {f.text()} ({f.sims} simulations, {f.ms:.0f} ms).")
-    if f.pairs_only_estimate:
-        typer.echo("The simulation asks pairs only, so this list may need fewer rounds.")
 
 
 @app.command()
@@ -395,6 +397,7 @@ def report(
         str, typer.Option("--format", help="md (Markdown) or json.", case_sensitive=False)
     ] = "md",
     as_json: JsonOpt = False,
+    judge: JudgeOpt = "me",
 ) -> None:
     """A report for an agent: the ranking, ties, weak spots, slow decisions, upsets and the
     judge's habits."""
@@ -403,7 +406,7 @@ def report(
     if fmt.lower() not in ("md", "json"):
         _fail("--format must be md or json")
     try:
-        data = build(_service(ctx), slug)
+        data = build(_service(ctx, judge), slug)
     except RankifyError as e:
         _fail(str(e))
     if as_json or fmt.lower() == "json":

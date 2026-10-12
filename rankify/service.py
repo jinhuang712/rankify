@@ -5,7 +5,7 @@ import secrets
 from collections import Counter
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from time import perf_counter
 
 import numpy as np
@@ -24,7 +24,7 @@ from rankify.engine.baselines import (
 )
 from rankify.engine.calibration import JudgeProfile, estimate_profile
 from rankify.engine.fit import fit_pairs, fit_pairs_learning_sigma, initial_x
-from rankify.engine.forecast import FORECAST_NAME, forecast_rounds
+from rankify.engine.forecast import FORECAST_NAME, Habits, forecast_rounds
 from rankify.engine.model import A_WINS, B_WINS, TIE, Choices, Pairs, Prior
 from rankify.engine.planner import (
     ALL_KINDS,
@@ -164,7 +164,6 @@ class ForecastView:
     at_least: int | None
     sims: int
     ms: float
-    pairs_only_estimate: bool  # the list also asks picks and orderings; the forecast doesn't
 
     def as_dict(self) -> dict:
         return {
@@ -520,10 +519,10 @@ class Rankify:
                 f.at_least,
                 f.sims,
                 f.ms,
-                not _pairs_only(lst),
             )
 
-        version = f"{ENGINE_VERSION}/{FORECAST_NAME}"
+        # The judge's own times and habits go into the forecast.
+        version = f"{ENGINE_VERSION}/{FORECAST_NAME}/{self.judge}"
         saved = store.latest_forecast(self.conn, lst.id, upto, active, mode, version)
         if saved is not None:
             return view(saved)
@@ -541,6 +540,11 @@ class Rankify:
         if _method(lst) != "rankify" or lst.settings.get("repeat_share"):
             return None
         r = self._current(lst)
+        judge = store.judge_id(self.conn, self.judge)
+        timing = Timing.fit(
+            store.timing_samples(self.conn, lst.id, judge),
+            store.set_timing_samples(self.conn, lst.id, judge),
+        )
         return {
             "mode": mode or lst.settings["mode"],
             "theta": r.theta,
@@ -548,6 +552,11 @@ class Rankify:
             "active": [p for p, _, _ in r.ranks],
             "looks": _looks(r),
             "seed": derive_seed(lst.settings["seed"], r.upto_round_id or 0, 3),
+            "timing": timing,
+            "kinds": PAIRS_ONLY if _pairs_only(lst) else ALL_KINDS,
+            "habits": Habits(tie=float(np.exp(r.x[-1]))),  # the fit's Davidson weight
+            **_sittings(store.effective_rounds(self.conn, lst.id), judge),
+            "sigma": r.params.get("sigma"),
         }
 
     def calibrate(self, slug: str) -> JudgeProfile:
@@ -940,6 +949,29 @@ def _looks(r: Refit) -> Counter:
     for shown, _ in r.set_rounds:
         looks.update(shown)
     return looks
+
+
+SITTING_GAP = timedelta(minutes=30)  # a longer pause starts a new sitting
+
+
+def _sittings(rounds: list[store.RoundRow], judge: int, at: datetime | None = None) -> dict:
+    """Fatigue builds up within a sitting and resets between them. Returns ``effort``, the
+    calls this judge has made in the sitting under way (0 if their last answer was more than
+    SITTING_GAP ago), and ``past_efforts``, how far into its sitting each call behind the
+    fit was made, by any judge. A pair is one call, and a set of k items k - 1."""
+    at = at or datetime.now(UTC)
+    past: list[int] = []
+    last: dict[int, tuple[datetime, int]] = {}  # judge -> (last answer, calls this sitting)
+    for r in rounds:
+        t = datetime.fromisoformat(r.created_at) if r.created_at else at
+        before = last.get(r.judge_id)
+        done = 0 if before is None or t - before[0] > SITTING_GAP else before[1]
+        calls = max(len(r.shown) - 1, 1)
+        past.extend(range(done, done + calls))
+        last[r.judge_id] = (t, done + calls)
+    mine = last.get(judge)
+    effort = mine[1] if mine is not None and at - mine[0] <= SITTING_GAP else 0
+    return {"effort": effort, "past_efforts": past}
 
 
 def _pairs_only(lst: store.ListRow) -> bool:

@@ -98,7 +98,7 @@ rankify report travel             # report for an AI agent, in Markdown
 rankify report travel --format json
 ```
 
-`forecast` plays the rest of the session forward about 30 to 60 times in simulation (see [DESIGN.md](../../DESIGN.md#rounds-left)) and gives the median and the 10–90% range of the rounds left. It takes up to a second, and a forecast is saved and reused until the list changes. `next` shows the same estimate; `next --no-forecast` skips it. When too many simulations run out of time, the answer is "at least N rounds". On a list made with `--rounds mixed`, the simulation still asks pairs only, so it can overestimate.
+`forecast` plays the rest of the session forward in simulation, about 10 to 60 times for a list of pairs and 5 to 15 times for a mixed list (see [DESIGN.md](../../DESIGN.md#rounds-left)), and gives the median and the 10–90% range of the rounds left. The simulation asks the same kinds of round the list does, and its judge takes your times, says "can't decide" as often as you have, and tires as a sitting goes on. `forecast` and `report` take `--judge` like `next`, since times and habits are each judge's own. It takes up to a second, and a forecast is saved and reused until the list changes. `next` shows the same estimate; `next --no-forecast` skips it. When too many simulations run out of time, the answer is "at least N rounds".
 
 `report` gives an agent what it needs to dig deeper: the ranking with Score, Confidence and Could be; confident ties; weak spots (close neighbours never compared directly); slow decisions; upsets the final scores can't explain; the judge's position bias and consistency; and with several judges, where they disagree.
 

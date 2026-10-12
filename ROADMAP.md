@@ -147,6 +147,37 @@ Found in review and fixed before the benchmark:
 
 Next: simulating picks and orderings in the forecast, and a judge with slips and fatigue, would address the misses. The human pilot (Phase 5) comes first, because it also measures how long ordering really takes.
 
+**Follow-up (2026-10-12): the forecast for mixed lists.** Done alongside the pilot rather than after it.
+
+What changed (see [DESIGN.md](DESIGN.md#rounds-left)):
+
+- The simulation asks picks and orderings too, chosen with the real planner's code.
+- Its judge says "can't decide" at the rate the fit learned for the list, and tires as a sitting goes on. A pause of more than 30 minutes starts a new sitting.
+- Each simulation draws the prior width from what is known about it, and redoes the fit for that width.
+- Simulated slips were tried and dropped: the fit already accounts for them, and adding them made forecasts run long.
+- `forecast` and `report` take `--judge`, since the forecast now uses each judge's own times.
+
+Against G7 ([report](experiments/2026-10-12-forecast-mixed.md); human judge, 20 lists per setting):
+
+- **Pairs, Quick and Stable:** met at both sizes, for the first time. The range held 76% and 89% (Quick, 10 and 20 items) and 81% and 78% (Stable), and the median was off by 14–24%. In Phase 4: 67–89%, with medians off 14–22%.
+- **Mixed lists, Stable:** met on 20 items (range held 77%, median off 25%). On 10 items the range held 91%, just over the target's 90%, with the median off 15%. In Phase 4: 23–26% and 132–148%.
+- **Mixed lists, Quick:** the range held 79% and 80%, but the median was off by 42% and 41%. Not met.
+- **Mixed lists, Exact:** the range held 62% and 53%, the median was off by 35% and 29%. Not met, though Phase 4 held 0–6%.
+- **Pairs, Exact:** the range held 43% on 10 items; on 20 items no session finished within the round budget, so it can't be scored.
+- **Perfect judge:** still fails (range 0–39%, medians off 85–248%). The forecast assumes answers as noisy as the fit says, and a perfect judge is not.
+
+On a fresh list the low end of the range can sit far below the median, as in "72 (12–99)". That is the model allowing that the items might be nearly tied, in which case the real fit also learns a narrow spread and stops early. Clipping it would be arbitrary, and coverage was worse without the width draws.
+
+Found in review and fixed before the final benchmark:
+
+- A single Newton step per pick, ordering or "can't decide" overshot when the answer surprised an unsure fit; a "can't decide" could swap the two items. Each update now finds the mode of the shown items.
+- Fatigue counted every answer ever given on the list, so it never reset between sittings.
+- `forecast` and `report` always used the judge "me".
+
+Why mixed forecasts still run high: real sessions shift toward orderings as the judge's measured times replace the guesses (on the benchmark's judge, ordering 4 items took 2.2–2.8 typical pairs against the guessed 3), and pair times stay at their default because mixed sessions ask so few pairs. The simulation can't foresee times not yet measured. In the forecast's own simulations, pairs are 25–40% of rounds; in real sessions, 8–16%.
+
+Speed: a mixed forecast fits about 5 to 15 simulations into its 0.8 s budget, against about 10 to 60 for pairs. In the terminal UI on a 20-item mixed list, a key reaches the UI within 11 ms while a forecast runs (median 0.5 ms), and the next round is drawn 26 ms after the answer key (p95 30 ms), the cost of planning sets, not of the forecast. (A headless test's "key to next round" reads about 0.9 s, but that is Textual's test pilot waiting up to a second for the process to go idle while the forecast keeps it busy.)
+
 ## Phase 5: Human pilot
 
 **Done early (2026-10-12):** the calibration tools are built: `new --calibrate`, a minimal `play`, `calibrate`, and `bench --judge-profile`. The first real calibration session comes next, before Phase 2.
