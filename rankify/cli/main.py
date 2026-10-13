@@ -250,8 +250,8 @@ def forecast(
     as_json: JsonOpt = False,
     judge: JudgeOpt = "me",
 ) -> None:
-    """Estimate how many rounds are left until the mode's target, by simulating the rest of
-    the session with this judge's times and habits."""
+    """Estimate how many rounds are left until the mode's target, from the answers each pair
+    the mode needs will take with this judge's habits."""
     try:
         f = _service(ctx, judge).forecast(slug, mode)
     except RankifyError as e:
@@ -260,13 +260,13 @@ def forecast(
         _emit_json(
             None
             if f is None
-            else {"list": f.list, "mode": f.mode, **f.as_dict(), "sims": f.sims, "ms": f.ms}
+            else {"list": f.list, "mode": f.mode, **f.as_dict(), "draws": f.draws, "ms": f.ms}
         )
         return
     if f is None:
         typer.echo("No forecast: only lists ranked by rankify's planner have one.")
         return
-    typer.echo(f"{f.mode.capitalize()}: {f.text()} ({f.sims} simulations, {f.ms:.0f} ms).")
+    typer.echo(f"{f.mode.capitalize()}: {f.text()} ({f.draws} draws, {f.ms:.0f} ms).")
 
 
 @app.command()

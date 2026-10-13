@@ -226,11 +226,17 @@ class Candidate:
 class Plan:
     chosen: Candidate | None  # None: stop
     candidates: list[Candidate]  # the best few, for `rankify why`
-    reason: str  # "first look", "best value", "target reached" or "nothing worth asking"
+    # "first look", "best value", "another look", "target reached" or "nothing worth asking"
+    reason: str
     in_play: int
 
 
 MIN_LOOKS = 2  # answers about an item before the planner may judge it unimportant
+# Before the floor may stop a session, every item still in play gets this many answers.
+# On a long list the chance of belonging to the top is spread thinly over many barely
+# seen items, so no single pair looks worth asking even while who belongs there is
+# still open (on 50-item Quick lists the floor stopped with the top 3 wrong in half).
+TOPUP_LOOKS = 6
 # How the planner scores pairs. "time" is rankify: order information per second. The
 # others exist only to check that choice in the benchmark: "per-round" ignores time,
 # and "closest" asks the relevant pair closest to 50/50 (uncertainty sampling) in place
@@ -329,6 +335,9 @@ def plan_round(
     if not unseen:
         later = order_information_over(mu[best], var[best], FLOOR_ANSWERS) * relevance[best]
         if later.max(initial=0.0) < FLOOR_BITS:
+            look = _another_look(order, play, looks, theta, cov, region, timing, rng)
+            if look is not None:
+                return Plan(look, [look], "another look", len(play))
             return Plan(None, candidates, "nothing worth asking", len(play))
     set_kinds = [k for k in ("pick", "rank") if k in kinds]
     if set_kinds and len(order) >= 3:
@@ -339,6 +348,34 @@ def plan_round(
             everything = sorted(pairs + grown, key=lambda c: -c.value)[:5]
             return Plan(everything[0], everything, reason, len(play))
     return Plan(candidates[0], candidates, reason, len(play))
+
+
+def _another_look(order, play, looks, theta, cov, region, timing, rng) -> Candidate | None:
+    """When the floor would stop: the least-seen item still in play, if it has fewer than
+    TOPUP_LOOKS answers, against the partner whose answer is worth most per second."""
+    short = sorted((looks.get(p, 0), p) for p in play if looks.get(p, 0) < TOPUP_LOOKS)
+    if not short:
+        return None
+    new = short[0][1]
+    others = np.array([q for q in order if q != new])
+    i, j = np.full(len(others), new), others
+    mu = theta[i] - theta[j]
+    var = np.maximum(cov[i, i] + cov[j, j] - 2 * cov[i, j], 1e-12)
+    margin = closeness(mu, var)
+    gain = order_information(mu, var) * region.pairs(i, j)
+    seconds = timing.seconds(margin)
+    k = int(np.argmax(gain / seconds))
+    a, b = (int(i[k]), int(j[k])) if rng.random() < 0.5 else (int(j[k]), int(i[k]))
+    confidence = float(_phi(np.array((theta[a] - theta[b]) / math.sqrt(var[k] + 1e-18))))
+    return Candidate(
+        "pair",
+        (a, b),
+        float(gain[k]),
+        float(seconds[k]),
+        float(gain[k] / seconds[k]),
+        confidence,
+        float(margin[k]),
+    )
 
 
 # ---------------------------------------------------------------- pick and rank rounds

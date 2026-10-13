@@ -228,6 +228,29 @@ What it shows, for rankify on pairs:
 
 Step 2 fixes these, then the benchmark runs again.
 
+**Step 2 (2026-10-13): fixes, and rounds left as a formula.** Reports: [all judges](experiments/2026-10-13-step2-judges.md), [50 items](experiments/2026-10-13-step2-fifty-items.md), the same lists as step 1.
+
+Changed:
+
+- **Another look before giving up.** When the floor would stop the session, an item still in play with fewer than 6 answers first gets another look (see DESIGN.md, Stopping). On long lists the chance of belonging to the top was spread thinly over many barely seen items, so no single pair looked worth asking while the top was still open.
+- **Could be** is now the narrowest run of ranks holding 90% of the draws. The stopping rules keep the wider central range as a margin; with the narrower one, Stable stopped earlier with the human judge.
+- **Rounds left is a formula, not a simulation.** Each pair the mode still needs gets a closed-form count of the answers it will take, over 64 draws of the true scores (see DESIGN.md, Rounds left). A forecast takes about 8 ms instead of up to a second, gives the same answer every time, and is cheap enough to follow every answer at public scale.
+
+What the benchmark shows, for rankify on pairs:
+
+- **50 items, normal judge:** Quick was really met at the stop in 10 of 10 lists, against 4 of 10 in step 1.
+- **50 items, human judge:** Quick was really met at the stop in 3 of 10 (step 1: 1), with the true #1 on top in 8 of 10 (step 1: 7). G8 asks 9 of 10, so this is still a miss.
+- **20 items:** Quick was really met at the stop in 13 of 20 lists with the noisy judge (step 1: 10) and 17 of 20 with the fuzzy judge (step 1: 15). Other settings didn't change.
+- **Rounds left (G7)** held in more settings than before in 41 of 44 settings. Stable held 80–89% for most judges, Quick 82–92% for the human, noisy and fuzzy judges, and on 50 items 98–100%. Mixed lists held 73–95%. In step 1 most settings held 13–82%.
+- **Could be (G6)** held the true rank 92–100% of the time, and 86% for the human judge on 20 items: still too wide for the clearer judges.
+
+Still open:
+
+- **Forecasts for clear judges run long early.** Quick held only 49–66% for the sharp, normal and Thurstone judges, with the median 60–90% too high, and 10–40% for the perfect judge. Early on, the fit's width and the judge's sharpness both read low, so the forecast takes a decisive judge for an ordinary one. Carrying a judge's sharpness from one list to the next would help returning judges.
+- **Late in Stable sessions** forecasts run about 30% short: the "another look" rounds aren't counted.
+- **Stable stops early for low-accuracy judges:** on 20 items it stopped with 87% (human) and 83% (noisy) of the top pairs right, against the 90% G8 asks.
+- **G1 on 10 items with low-accuracy judges** still misses. Pairs can't tell such judges' items apart much faster; this is accepted as a limit of pairs.
+
 ## Phase 5: Human pilot
 
 **Done early (2026-10-12):** the calibration tools are built: `new --calibrate`, a minimal `play`, `calibrate`, and `bench --judge-profile`. The first real calibration session comes next, before Phase 2.

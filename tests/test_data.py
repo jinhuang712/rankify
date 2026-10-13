@@ -96,7 +96,7 @@ def test_export_command_writes_json_lines(tmp_path):
 
 def test_rebuild_refits_with_this_engine_and_shows_what_moved(rk, conn):
     _busy_list(rk)
-    rk.forecast("m", budget_ms=100)
+    rk.forecast("m")
     assert conn.execute("SELECT COUNT(*) FROM forecasts").fetchone()[0] == 1
     fit = store.latest_fit(conn, store.get_list(conn, "m").id)
     top, second = fit.items[0], fit.items[1]

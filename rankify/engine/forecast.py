@@ -1,46 +1,62 @@
-"""Rounds left: play the rest of the session forward in simulation.
+"""Rounds left, by formula: the answers each pair the mode needs will take.
 
-Each simulation draws plausible "true" scores from the current fit and lets a simulated
-judge answer. A cheap planner asks what the real one would, and stops by the same rules:
-first looks, the mode's target, and the "nothing worth asking" floor. On a list with pick
-and rank rounds, it grows sets the way the real planner does and weighs them against pairs
-by information per second, with the judge's own times. The spread of the round counts over
-many simulations gives the range, like "about 14 (10–19)".
+A session stops when the mode's target holds (a few neighbour pairs confidently ordered or
+tied, and nothing below the settled part could still reach into it; stop.py), or when no
+pair is worth asking any more (the planner's floor). Both are statements about single gaps,
+so the rounds left are a sum of per-pair sample sizes, the way a trial is sized for the
+difference it must detect.
 
-The simulated judge answers as the model expects (Bradley–Terry pairs, Plackett–Luce sets)
-with two habits on top, in ``Habits``: "can't decide" at the rate the fit has learned for
-this list (Davidson's tie weight), and answers that get noisier as the session wears on.
-Fatigue can't be measured from one short list, so it is a guess until a real session
-measures it. Occasional answers at random (lapses) are left out: the fit already narrows
-its scores to explain the upsets it has seen, so simulating lapses on top counted them
-twice, and forecasts ran long.
+Which pairs those are, and how far apart, depends on the true scores, which are unknown. So
+the forecast takes a fixed set of draws of them from the fit, with the prior width drawn
+too while the fit is still learning it (MacKay 1992), and in each draw reads the pairs the
+mode needs off the true order. Each pair then needs answers until it is done:
 
-The fit learns how widely scores spread (the prior width) from the answers, and early on
-that width is unsure: on the benchmark's lists it dips from 1.5 to about 1.0 after ten
-answers and climbs back to 1.3–1.75 later. So each simulation draws a width from what is
-known about it, and redoes the fit's Gaussian for that width with the same answers, before
-drawing true scores from it and starting the simulated fit there.
+- The fit is a Laplace approximation (Tierney & Kadane 1986), so after n more answers at
+  the judge's true rates, its estimate m of the gap solves (m - m0) / v0 = n (drive - G(m)):
+  the precision now (1 / v0) times the shift equals the expected score of the answers. G is
+  the score the model expects at m and ``drive`` the one the judge gives, under Davidson's
+  model of wins, losses and "can't decide" (Davidson 1970). The precision becomes
+  1 / v0 + n H(m), H being the slope of G. Read the other way round, n is a closed form of
+  m, so walking m from today's estimate toward the true gap traces the whole path with no
+  simulation. A clear judge's answers are predictable, yet each still moves an unsure
+  estimate a lot; this path keeps that, where the information at the true gap would not.
+- On that path the pair is done once Confidence reaches the mode's level, once it is a
+  confident tie (where a tie counts), or once 8 more answers would teach it less than 0.1
+  bits, weighted by how much the pair matters (the floor). The floor's bits come from a
+  table computed once.
+- Pairs share items, so what one pair's answers teach reaches the others through the fit's
+  covariance: the answers of the pairs that settle the top are added to it in one low-rank
+  update (Woodbury 1950) before the items below are counted.
+- An item below the settled part is out once it is unlikely to beat whatever ends up last
+  in that part: a line whose value and spread come from the draws. Against that crowd it
+  is out sooner than against any one item, which matters on long lists. Its pairs matter
+  only as much as the edge item belongs to the part, about the edge pair's Confidence.
 
-Refitting after every simulated answer would take far too long, so each answer updates the
-fit's Gaussian in closed form instead. A pair answer takes one moment-matching step for a
-probit answer, the update TrueSkill makes for a game (Herbrich, Minka & Graepel 2007), with
-the logistic curve matched by a probit curve with scale 1.702. A pick, a ranking or "can't
-decide" finds the posterior mode of the shown items with a few damped Newton steps and
-takes the covariance from the answer's information there (a Laplace update; MacKay 1992),
-as the real fit does over all answers; the other items follow through their covariance. Could be, and how much each pair matters for the mode,
-come from fewer posterior draws than the screen uses.
+The answers add up over the pairs (first looks still owed are answers too) and become
+rounds: one each for pairs, about 2.5 pairs' worth for a pick or ordering (fitted on the
+benchmark's mixed sessions). The judge's habits enter through their rates: how decisive
+they are (sharpness), how often they can't decide, and how much noisier they get as the
+sitting goes on (fatigue, averaged over the calls still to come). How the answers fall
+spreads each draw's count further, by a lognormal fitted on the benchmark's sessions; the
+range is the 10th to 90th percentile of that mixture.
+
+It costs a few array operations over draws times pairs, a few milliseconds, and gives the
+same answer every time. It replaced a Monte Carlo simulation of the rest of the session,
+which took up to a second per forecast and would not scale to a public service; on the
+benchmark's saved sessions it is as accurate or more.
 """
 
 import math
-from collections.abc import Callable, Generator, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass
+from functools import cache
 from statistics import NormalDist
 from time import perf_counter
 
 import numpy as np
 
 from rankify.engine import stop
-from rankify.engine.fit import DEFAULT_SIGMA_PRIOR, _best_log_sigma
+from rankify.engine.fit import DEFAULT_SIGMA_PRIOR
 from rankify.engine.judge import HumanParams
 from rankify.engine.model import Prior
 from rankify.engine.planner import (
@@ -49,33 +65,33 @@ from rankify.engine.planner import (
     MIN_LOOKS,
     PAIRS_ONLY,
     STABLE_TIER_WEIGHT,
-    Candidate,
-    Timing,
-    _grow_sets,
-    _pool,
-    closeness,
-    order_information,
     order_information_over,
-    set_gain,
 )
 
-FORECAST_NAME = "adf-mixed-0.4"
+FORECAST_NAME = "formula-1"
 LOW_Q, HIGH_Q = 0.1, 0.9  # the range shown: 10th to 90th percentile
-_PROBIT = 1.702  # sigmoid(d) ~ Phi(d / 1.702)
-_WINDOW = 3  # candidate pairs: each item against the next few in the current order
-_DRAWS = 96  # posterior draws for Could be and relevance
-_ALL_PAIRS = 30  # above this many items, only pair each item with the next few
-_REFRESH = 4  # simulated rounds between fresh posterior draws
+DRAWS = 64  # draws of the true scores
+REACH_LEVEL = 0.95  # "could still reach in": the 5% tail of the reach range stop.py uses
+LUCK = 0.3  # sd of the log of the rounds a draw needs, from how the answers fall
+PAIRS_PER_SET_ROUND = 2.5  # pair answers a pick or ordering of 3-5 is worth
 _CAP_PER_ITEM = 50  # Exact on 20 items took about 25 rounds per item with the human judge
-_PAUSE_EVERY = 4  # simulated pair rounds between pauses of forecast_steps
-_SET_SEEDS = 1  # the real planner grows sets from two pairs; two changed little here
-_NODES16 = np.array([NormalDist().inv_cdf((k + 0.5) / 16) for k in range(16)])
+# How far the estimate has moved toward the true gap: fine near both ends, where the
+# answers grow in proportion to the move (near 0) or to 1 / (1 - move) (near 1).
+_U = np.concatenate([[0.0], np.geomspace(1e-5, 0.5, 32), 1.0 - np.geomspace(0.5, 1e-6, 32)[1:]])
+_N_FLAT = np.concatenate([[0.0], np.geomspace(0.05, 4000.0, len(_U) - 1)])  # where it can't move
+_REFINE = 8  # points inside the last step, to read the answers more finely
+
+# The floor table: bits from 8 more answers to a pair, by how many standard deviations its
+# gap is from zero and log10 of the gap's variance. Read with bilinear interpolation, it
+# says "below the floor" as the exact sum does at all but about 1 in 1000 points.
+_T_Z = np.linspace(0.0, 6.0, 121)
+_T_LOGV = np.linspace(-4.0, 1.5, 56)
 
 
 @dataclass(frozen=True)
 class Habits:
-    """How the simulated judge answers, beyond the model. ``tie`` comes from the list's fit;
-    fatigue is the benchmark's guessed human judge until a real session measures it."""
+    """How the judge answers, beyond the model. ``tie`` comes from the list's fit; fatigue
+    is the benchmark's guessed human judge until a real session measures it."""
 
     fatigue: float = HumanParams.fatigue  # noise grows by this share per call made...
     fatigue_cap: float = HumanParams.fatigue_cap  # ...up to this multiple
@@ -94,6 +110,19 @@ class Habits:
         e = np.asarray(efforts, dtype=float)
         return float(np.mean(np.minimum(1.0 + self.fatigue * e, self.fatigue_cap)))
 
+    def noise_over(self, start: float, calls: np.ndarray) -> np.ndarray:
+        """The average noise over ``calls`` more calls from ``start``."""
+        if self.fatigue <= 0:
+            return np.ones_like(calls)
+        knee = (self.fatigue_cap - 1.0) / self.fatigue
+
+        def area(e):
+            below = np.minimum(e, knee)
+            return below + self.fatigue * below**2 / 2 + self.fatigue_cap * np.maximum(e - knee, 0)
+
+        calls = np.maximum(calls, 1e-9)
+        return (area(start + calls) - area(start)) / calls
+
 
 @dataclass(frozen=True)
 class Forecast:
@@ -103,370 +132,215 @@ class Forecast:
     low: int | None  # 10th percentile
     high: int | None  # 90th percentile
     at_least: int | None
-    sims: int  # simulations run
-    capped: int  # simulations cut short (too many rounds, or out of time)
+    draws: int  # draws of the true scores
+    capped: int  # draws that needed more than the cap
     ms: float
 
 
-class _Draws:
-    """Ranks in posterior draws, recomputed after every few simulated answers. They give
-    Could be and how much each pair matters, the same way the real planner gets them. (A
-    normal approximation of each rank was tried first; it treats "j is above i" as
-    independent for every j, which makes ranks far too certain early on.)"""
-
-    def __init__(self, m: np.ndarray, s: np.ndarray, rng: np.random.Generator):
-        k = len(m)
-        try:
-            chol = np.linalg.cholesky(s + 1e-12 * np.eye(k))
-        except np.linalg.LinAlgError:
-            w, v = np.linalg.eigh(s)
-            chol = v * np.sqrt(np.clip(w, 0.0, None))
-        sample = m + rng.standard_normal((_DRAWS, k)) @ chol.T
-        self.ranks = np.empty((_DRAWS, k), dtype=np.int64)
-        self.ranks[np.arange(_DRAWS)[:, None], np.argsort(-sample, axis=1)] = np.arange(1, k + 1)
-        self._top: dict[str, np.ndarray] = {}
-
-    def ranges(self, order: np.ndarray) -> list[tuple[int, int, int]]:
-        """(position, rank_lo, rank_hi) best first: a 90% range, as `summarize` makes it."""
-        lo = np.quantile(self.ranks, 0.05, axis=0, method="lower")
-        hi = np.quantile(self.ranks, 0.95, axis=0, method="higher")
-        return [
-            (int(p), min(int(lo[p]), place), max(int(hi[p]), place))
-            for place, p in enumerate(order, start=1)
-        ]
-
-    def top(self, mode: str) -> np.ndarray:
-        """(draws, items): whether each item is in the part the mode settles (planner._Region)."""
-        if mode not in self._top:
-            k = self.ranks.shape[1]
-            self._top[mode] = self.ranks <= (3 if mode == "quick" else stop.top_size(k) + 1)
-        return self._top[mode]
-
-    def relevance(self, mode: str, i: np.ndarray, j: np.ndarray) -> np.ndarray:
-        """The chance either item belongs to the part the mode settles."""
-        if mode == "exact":
-            return np.ones(len(i))
-        top = self.top(mode)
-        rel = np.mean(top[:, i] | top[:, j], axis=0)
-        return np.maximum(rel, STABLE_TIER_WEIGHT) if mode == "stable" else rel
+# ---------------------------------------------------------------- the pieces
 
 
-class _Region:
-    """``planner._Region.within`` from the simulation's draws, for growing sets."""
-
-    def __init__(self, mode: str, draws: _Draws, everything: bool):
-        self.mode = mode
-        self.top = None if everything or mode == "exact" else draws.top(mode)
-
-    def within(self, sets: np.ndarray) -> np.ndarray:
-        c, k = sets.shape
-        if self.top is None:
-            return np.ones((c, k, k))
-        t = self.top[:, sets]
-        rel = np.mean(t[..., :, None] | t[..., None, :], axis=0)
-        return np.maximum(rel, STABLE_TIER_WEIGHT) if self.mode == "stable" else rel
+@cache
+def _floor_table() -> np.ndarray:
+    z, logv = np.meshgrid(_T_Z, _T_LOGV, indexing="ij")
+    v = 10.0 ** logv.ravel()
+    bits = order_information_over(z.ravel() * np.sqrt(v), v, FLOOR_ANSWERS)
+    return np.ascontiguousarray(bits.reshape(z.shape).ravel())
 
 
-# ---------------------------------------------------------------- belief updates
+def later_bits(mu: np.ndarray, var: np.ndarray) -> np.ndarray:
+    """Bits from 8 more answers to a pair whose gap is N(mu, var), from the floor table."""
+    t = _floor_table()
+    rows = len(_T_LOGV)
+    var = np.maximum(var, 1e-12)
+    fx = np.minimum(np.abs(mu) / np.sqrt(var), _T_Z[-1]) * (1.0 / (_T_Z[1] - _T_Z[0]))
+    fy = np.clip(np.log10(var) - _T_LOGV[0], 0.0, _T_LOGV[-1] - _T_LOGV[0])
+    fy *= 1.0 / (_T_LOGV[1] - _T_LOGV[0])
+    i = np.minimum(fx.astype(np.intp), len(_T_Z) - 2)
+    j = np.minimum(fy.astype(np.intp), rows - 2)
+    u, w = fx - i, fy - j
+    k = i * rows + j
+    lo = t.take(k) + (t.take(k + rows) - t.take(k)) * u
+    hi = t.take(k + 1) + (t.take(k + rows + 1) - t.take(k + 1)) * u
+    return lo + (hi - lo) * w
 
 
-def _update(m: np.ndarray, s: np.ndarray, i: int, j: int, i_won: bool) -> None:
-    """One probit moment-matching step for "i beat j" (or the reverse), in place."""
-    y = 1.0 if i_won else -1.0
-    col = s[:, i] - s[:, j]
-    var = col[i] - col[j]
-    denom2 = _PROBIT**2 + max(var, 0.0)
-    denom = math.sqrt(denom2)
-    t = y * (m[i] - m[j]) / denom
-    cdf = 0.5 * math.erfc(-t / math.sqrt(2.0))
-    pdf = math.exp(-0.5 * t * t) / math.sqrt(2.0 * math.pi)
-    v = pdf / cdf if cdf > 1e-300 else -t  # Mills ratio; -t far in the tail
-    w = v * (v + t)
-    m += y * col * (v / denom)
-    s -= np.outer(col, col) * (w / denom2)
+def _phi(x: np.ndarray) -> np.ndarray:
+    """The normal CDF (Abramowitz & Stegun 1964, 7.1.26; measured error under 1e-7)."""
+    z = np.abs(x) / math.sqrt(2.0)
+    t = 1.0 / (1.0 + 0.3275911 * z)
+    poly = t * (
+        0.254829592 + t * (-0.284496736 + t * (1.421413741 + t * (-1.453152027 + t * 1.061405429)))
+    )
+    return 0.5 * (1.0 + np.sign(x) * (1.0 - poly * np.exp(-z * z)))
 
 
-# An answer's log-likelihood at the shown items' scores u: (value, gradient, information).
-LogLik = Callable[[np.ndarray], tuple[float, np.ndarray, np.ndarray]]
+_Z: dict[float, float] = {}
 
 
-def _laplace(m: np.ndarray, s: np.ndarray, idx: np.ndarray, loglik: LogLik) -> None:
-    """Update the belief for an answer about the items ``idx``, in place: find the posterior
-    mode of the shown items by damped Newton steps (a few suffice for 2 to 5 items), take
-    the covariance from the answer's information there, as the real fit does (a Laplace
-    update), and carry the change to the other items through their covariance. A single
-    step from the current mean overshoots when an answer is surprising and the scores are
-    still unsure: a "can't decide" could flip the pair's order."""
-    k = len(idx)
-    prior_m = m[idx].copy()
-    block = s[np.ix_(idx, idx)]
-    prec = np.linalg.inv(block)
-
-    def objective(u: np.ndarray) -> tuple[float, np.ndarray, np.ndarray]:
-        value, g, f = loglik(u)
-        d = u - prior_m
-        return value - 0.5 * d @ prec @ d, g - prec @ d, f
-
-    u = prior_m.copy()
-    value, grad, f = objective(u)
-    for _ in range(20):
-        step = np.linalg.solve(f + prec, grad)
-        t = 1.0
-        while True:  # the objective is concave; halve a step that goes past the peak
-            new = objective(u + t * step)
-            if new[0] >= value - 1e-12 or t < 1e-3:
-                break
-            t /= 2
-        u = u + t * step
-        value, grad, f = new
-        if np.abs(t * step).max() < 1e-9:
-            break
-    sa = s[:, idx]
-    gain = f @ np.linalg.inv(np.eye(k) + block @ f)
-    s -= sa @ gain @ sa.T  # (S⁻¹ + F)⁻¹, fine for a singular F
-    m += s[:, idx] @ np.linalg.solve(s[np.ix_(idx, idx)], u - prior_m)
+def _z(level: np.ndarray) -> np.ndarray:
+    """The normal quantile of each level."""
+    out = np.empty(np.shape(level))
+    for lv in np.unique(level):
+        if lv not in _Z:
+            _Z[lv] = NormalDist().inv_cdf(float(lv))
+        out[level == lv] = _Z[lv]
+    return out
 
 
-def _choice_step(m: np.ndarray, s: np.ndarray, items: np.ndarray, best_first: np.ndarray) -> None:
-    """A pick (``best_first`` has one item) or a ranking of ``items`` under Plackett–Luce:
-    each choice is the best of the items not yet placed."""
-    k = len(items)
-    where = {int(p): r for r, p in enumerate(items)}
-    stages = []
-    rest = list(range(k))
-    for chosen in best_first[: k - 1]:
-        stages.append((list(rest), where[int(chosen)]))
-        rest.remove(where[int(chosen)])
-
-    def loglik(u: np.ndarray) -> tuple[float, np.ndarray, np.ndarray]:
-        value, g, f = 0.0, np.zeros(k), np.zeros((k, k))
-        for rest, c in stages:
-            v = u[rest]
-            top = v.max()
-            q = np.exp(v - top)
-            total = q.sum()
-            q /= total
-            value += u[c] - top - math.log(total)
-            g[rest] -= q
-            g[c] += 1.0
-            f[np.ix_(rest, rest)] += np.diag(q) - np.outer(q, q)
-        return value, g, f
-
-    _laplace(m, s, items, loglik)
+def score(m: np.ndarray, tie: float) -> tuple[np.ndarray, np.ndarray]:
+    """Davidson's model at gap m: the expected score G (half the chance of winning minus
+    that of losing) and its slope H, which is also the information of one answer."""
+    a, b = np.exp(m / 2), np.exp(-m / 2)
+    z = a + b + tie
+    return (a - b) / (2 * z), ((a + b) * z - (a - b) ** 2) / (4 * z * z)
 
 
-_TIE_JAC = np.array([[1.0, 0.0], [0.0, 1.0], [0.5, 0.5]])  # logits of i wins, j wins, tie
+def _done(m, sd, z, tie_ok, rel) -> np.ndarray:
+    """Whether a gap N(m, sd^2) is done: confident at quantile z, a confident tie where one
+    counts, or below the floor at relevance ``rel`` (z, tie_ok and rel broadcast)."""
+    ok = np.abs(m) >= z * sd
+    if np.any(tie_ok):
+        p_tie = _phi((stop.TIE_MARGIN - m) / sd) - _phi((-stop.TIE_MARGIN - m) / sd)
+        ok |= tie_ok & (p_tie >= stop.TIE_CONFIDENCE)
+    return ok | (rel * later_bits(m, sd * sd) < FLOOR_BITS)
 
 
-def _tie_step(m: np.ndarray, s: np.ndarray, i: int, j: int, nu: float) -> None:
-    """ "Can't decide" between i and j under Davidson's model: it pulls their scores together,
-    more so the further apart they are now."""
-    lam = math.log(nu)
+def path_answers(m0, v0, d, level, tie_ok, rel, tie: float = 0.0):
+    """(answers, estimate, precision) at which each pair is done, for flat arrays: today's
+    estimate ``m0`` of the gap and its variance ``v0``, the true gap ``d`` (in the fit's
+    units, as the judge answers), the Confidence ``level`` it must reach, whether a
+    confident tie counts, and how much the pair matters (``rel``, for the floor). Answers
+    are infinite where the pair is never done."""
+    v0 = np.maximum(v0, 1e-12)
+    z = _z(level)
+    answers = np.zeros(len(m0))
+    m_end, prec_end = np.asarray(m0, dtype=float).copy(), 1.0 / v0
+    todo = np.flatnonzero(~_done(m0, np.sqrt(v0), z, tie_ok, rel))  # often most are done
+    if len(todo) == 0:
+        return answers, m_end, prec_end
+    m0, v0, d, z, tie_ok, rel = m0[todo], v0[todo], d[todo], z[todo], tie_ok[todo], rel[todo]
+    p0 = 1.0 / v0
+    a, b = np.exp(d / 2), np.exp(-d / 2)
+    drive = ((a - b) / (2 * (a + b + tie)))[:, None]
+    moves = (np.abs(d - m0) > 1e-6)[:, None]
+    z, tie_ok, rel = z[:, None], tie_ok[:, None], rel[:, None]
 
-    def loglik(u: np.ndarray) -> tuple[float, np.ndarray, np.ndarray]:
-        z = _TIE_JAC @ u + np.array([0.0, 0.0, lam])
-        top = z.max()
-        p = np.exp(z - top)
-        total = p.sum()
-        p /= total
-        value = z[2] - top - math.log(total)
-        g = _TIE_JAC.T @ (np.array([0.0, 0.0, 1.0]) - p)
-        f = _TIE_JAC.T @ (np.diag(p) - np.outer(p, p)) @ _TIE_JAC
-        return value, g, f
+    def walk(u, flat):
+        """Answers, estimate, precision and done at moves u (rows, points) toward d."""
+        m = np.where(moves, m0[:, None] + (d - m0)[:, None] * u, m0[:, None])
+        g, h = score(m, tie)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            n = np.where(moves, (m - m0[:, None]) * p0[:, None] / (drive - g), flat)
+        n = np.maximum.accumulate(np.nan_to_num(np.maximum(n, 0.0), nan=np.inf), axis=1)
+        prec = p0[:, None] + n * h
+        return n, m, prec, _done(m, 1.0 / np.sqrt(prec), z, tie_ok, rel)
 
-    _laplace(m, s, np.array([i, j]), loglik)
-
-
-def _rewidth(m: np.ndarray, s: np.ndarray, old: float, new: float) -> None:
-    """Redo a Gaussian fit for prior width ``new`` instead of ``old``, with the same answers,
-    in place. The prior is Normal(0, width²) for every item, so the answers' precision is
-    the fit's precision minus 1/old², and their pull on the scores is precision times mean.
-    In the eigenbasis of the covariance this is a shift of each eigenvalue's inverse."""
-    w, v = np.linalg.eigh((s + s.T) / 2)
-    prec = 1.0 / np.clip(w, 1e-12, None)
-    pull = prec * (v.T @ m)
-    lam = np.clip(prec + 1.0 / new**2 - 1.0 / old**2, 1e-9, None)
-    m[:] = v @ (pull / lam)
-    s[:] = (v / lam) @ v.T
-
-
-class _Belief:
-    """One simulation's Gaussian belief, with posterior draws refreshed every few answers.
-    With a ``sigma``, the prior width is learned again before each refresh, as the real fit
-    learns it after every answer (one EM step at a time; Dempster, Laird & Rubin 1977)."""
-
-    def __init__(
-        self,
-        m: np.ndarray,
-        s: np.ndarray,
-        rng: np.random.Generator,
-        sigma: float | None = None,
-        rest: tuple[float, int] = (0.0, 0),
-    ):
-        self.m, self.s, self.rng, self.sigma = m, s, rng, sigma
-        self.rest = rest  # removed items' spread and count, which the real fit counts too
-        self._draws: _Draws | None = None
-        self._age = 0
-
-    def draws(self, fresh: bool) -> _Draws:
-        if fresh or self._draws is None or self._age >= _REFRESH:
-            self._draws, self._age = _Draws(self.m, self.s, self.rng), 0
-        return self._draws
-
-    def due(self) -> None:
-        """Before planning a round: learn the width again if fresh draws are due, so the
-        round is planned on one state throughout."""
-        if self.sigma and self._age >= _REFRESH:
-            self.relearn()
-
-    def relearn(self, steps: int = 3) -> None:
-        for _ in range(steps):
-            spread = float(self.m @ self.m + np.trace(self.s)) + self.rest[0]
-            n = len(self.m) + self.rest[1]
-            log_old = math.log(self.sigma)
-            new = math.exp(_best_log_sigma(spread, n, log_old, DEFAULT_SIGMA_PRIOR))
-            _rewidth(self.m, self.s, self.sigma, new)
-            self.sigma = new
-            if abs(math.log(new) - log_old) < 0.01:
-                break
-
-    def pair(self, i: int, j: int, i_won: bool) -> None:
-        _update(self.m, self.s, i, j, i_won)
-        self._age += 1
-
-    def tie(self, i: int, j: int, nu: float) -> None:
-        _tie_step(self.m, self.s, i, j, nu)
-        self._age += 1
-
-    def choice(self, items: np.ndarray, best_first: np.ndarray) -> None:
-        _choice_step(self.m, self.s, items, best_first)
-        self._age += 1
+    rows = np.arange(len(todo))
+    n, m, prec, ok = walk(np.broadcast_to(_U, (len(todo), len(_U))), _N_FLAT)
+    first = np.argmax(ok, axis=1)
+    never = ~ok[rows, first]
+    prev = np.maximum(first - 1, 0)
+    # inside the last step, more finely
+    t = np.linspace(0.0, 1.0, _REFINE + 1)[1:]
+    u = _U[prev][:, None] + (_U[first] - _U[prev])[:, None] * t
+    flat = _N_FLAT[prev][:, None] + (_N_FLAT[first] - _N_FLAT[prev])[:, None] * t
+    n2, m2, prec2, ok2 = walk(u, flat)
+    ok2[:, -1] = True  # the step's end is done
+    k = np.argmax(ok2, axis=1)
+    lo = np.where(k == 0, n[rows, prev], n2[rows, np.maximum(k - 1, 0)])
+    got = np.where(first == 0, 0.0, (lo + n2[rows, k]) / 2)  # halfway, in answers
+    answers[todo] = np.where(never, np.inf, got)
+    m_end[todo] = np.where(first == 0, m[rows, 0], m2[rows, k])
+    prec_end[todo] = np.where(first == 0, prec[rows, 0], prec2[rows, k])
+    return answers, m_end, prec_end
 
 
-# ---------------------------------------------------------------- the simulated judge
+@dataclass(frozen=True)
+class _Needs:
+    """For each draw, the pairs the mode needs, as places in that draw's true order."""
+
+    upper: np.ndarray  # (draws, pairs)
+    lower: np.ndarray
+    level: np.ndarray  # (pairs,) the Confidence each must reach
+    tie_ok: np.ndarray  # whether a confident tie settles it
+    below: np.ndarray  # an item below the settled part, against the line
+    rel: np.ndarray  # how much it matters, for the floor
+    edge: int  # the pair across the edge of the settled part, or -1
+    top: int  # how many items the mode settles
+    rel_floor: float  # the least a pair below matters (Stable's tier boundaries)
 
 
-def _answer_pair(truth, i: int, j: int, habits: Habits, scale: float, rng) -> int:
-    """1 if i wins, -1 if j wins, 0 for "can't decide". ``scale`` shrinks the true gap as
-    the judge tires."""
-    d = (truth[i] - truth[j]) * scale
-    a, b = math.exp(d / 2), math.exp(-d / 2)
-    u = rng.random() * (a + b + habits.tie)
-    return 1 if u < a else (-1 if u < a + b else 0)
+def _needs(mode: str, k: int, gaps: np.ndarray) -> _Needs:
+    """The pairs ``mode`` needs (stop.target_reached), read off each draw's true order.
+    ``gaps`` (draws, k - 1) are the true neighbour gaps, for Stable's tier boundaries."""
+    need: dict[tuple[int, int], tuple[float, bool]] = {}
 
+    def add(a: int, b: int, level: float, tie_ok: bool) -> None:
+        old = need.get((a, b))
+        need[(a, b)] = (level, tie_ok) if old is None else (max(level, old[0]), tie_ok and old[1])
 
-def _answer_set(truth, items: np.ndarray, kind: str, scale: float, rng):
-    """The items best first (one for a pick), under Plackett–Luce: utilities plus Gumbel
-    noise, sorted (Yellott 1977)."""
-    order = items[np.argsort(-(truth[items] * scale + rng.gumbel(size=len(items))))]
-    return order if kind == "rank" else order[:1]
-
-
-# ---------------------------------------------------------------- the cheap planner
-
-
-def _pairs(order: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """Candidate pairs: all of them on short lists, else each item against the next few."""
-    k = len(order)
-    if k <= _ALL_PAIRS:
-        a, b = np.triu_indices(k, 1)
+    draws = len(gaps)
+    if mode == "quick":
+        for i, level in enumerate((stop.QUICK_TOP, stop.QUICK_NEXT, stop.QUICK_NEXT)[: k - 1]):
+            add(i, i + 1, level, True)
+        top = min(3, k)
+    elif mode == "stable":
+        top = stop.top_size(k)
+        for i in range(min(top, k - 1)):
+            add(i, i + 1, stop.STABLE_LEVEL, True)
     else:
-        a = np.array([x for x in range(k) for d in range(1, _WINDOW + 1) if x + d < k])
-        b = np.array([x + d for x in range(k) for d in range(1, _WINDOW + 1) if x + d < k])
-    return order[a], order[b]
+        for i in range(k - 1):
+            add(i, i + 1, stop.EXACT_LEVEL, True)
+        top = k
+    for j in range(top, k):  # nothing below the settled part could still reach into it
+        add(top - 1, j, REACH_LEVEL, False)
+    upper = np.tile(np.array([a for a, _ in need], dtype=np.int64), (draws, 1))
+    lower = np.tile(np.array([b for _, b in need], dtype=np.int64), (draws, 1))
+    level = np.array([v[0] for v in need.values()])
+    tie_ok = np.array([v[1] for v in need.values()])
+    below = np.array([a == top - 1 and b > top for a, b in need])
+    rel = np.ones(len(need))
+    edge = list(need).index((top - 1, top)) if (top - 1, top) in need else -1
+    if mode == "stable":
+        rest = gaps[:, top:]  # tiers below the top split at the clearest gaps
+        cuts = min(stop.STABLE_TIERS, rest.shape[1]) - 1
+        if cuts > 0:
+            at = top + np.argsort(-rest, axis=1, kind="stable")[:, :cuts]
+            upper = np.concatenate([upper, at], axis=1)
+            lower = np.concatenate([lower, at + 1], axis=1)
+            level = np.concatenate([level, np.full(cuts, stop.STABLE_LEVEL)])
+            tie_ok = np.concatenate([tie_ok, np.zeros(cuts, bool)])
+            below = np.concatenate([below, np.zeros(cuts, bool)])
+            rel = np.concatenate([rel, np.full(cuts, STABLE_TIER_WEIGHT)])
+    floor = STABLE_TIER_WEIGHT if mode == "stable" else 0.0
+    return _Needs(upper, lower, level, tie_ok, below, rel, edge, top, floor)
 
 
-def _plan(
-    mode, order, m, s, nb, looks, draws_for, timing: Timing, kinds, rng
-) -> tuple[str, np.ndarray] | None:
-    """The round the cheap planner asks, as (kind, items), or None when it would stop.
-    ``draws_for(fresh)`` gives posterior draws, recent or (``fresh=True``) of the current
-    state. As in the real planner, sets grow from the best pair, but from one seed pair
-    instead of two."""
-    unseen = [p for p in order if looks[p] < MIN_LOOKS]
-    draws = draws_for(False)
-    # Stop only on fresh draws: the neighbours alone first, then Could be.
-    if not unseen and stop.target_reached(mode, nb):
-        draws = draws_for(True)
-        if stop.target_reached(mode, nb, draws.ranges(order)):
-            return None
-    if unseen:
-        new = min(unseen, key=lambda p: looks[p])
-        others = np.array([p for p in order if p != new])
-        i, j = np.full(len(others), new), others
-    else:
-        play = np.zeros(len(order), dtype=bool)
-        play[list(stop.in_play(mode, draws.ranges(order), nb))] = True
-        i, j = _pairs(order)
-        keep = play[i] | play[j]
-        if not keep.any():
-            return None
-        i, j = i[keep], j[keep]
-    mu = m[i] - m[j]
-    var = np.maximum(s[i, i] + s[j, j] - 2 * s[i, j], 1e-12)
-    relevance = np.ones(len(i)) if unseen else draws.relevance(mode, i, j)
-    gain = order_information(mu, var, _NODES16) * relevance
-    seconds = timing.seconds(closeness(mu, var))
-    value = gain / seconds
-    ranked = np.argsort(-value, kind="stable")
-    best = ranked[:5]
-    # Eight answers teach at least as much as one, so the floor can only stop the session
-    # when even the best single answer teaches less than it.
-    if not unseen and gain[best].max() < FLOOR_BITS:
-        later = order_information_over(mu[best], var[best], FLOOR_ANSWERS)  # as the planner
-        if (later * relevance[best]).max(initial=0.0) < FLOOR_BITS:
-            return None
-    pair = ("pair", np.array([i[best[0]], j[best[0]]]))
-    set_kinds = [k for k in ("pick", "rank") if k in kinds]
-    if not set_kinds or len(order) < 3:
-        return pair
-    region = _Region(mode, draws, everything=bool(unseen))
-    seeds = [Candidate("pair", (int(i[b]), int(j[b])), 0.0, 1.0, 0.0) for b in best[:_SET_SEEDS]]
-    pool = _pool(i[ranked], j[ranked])
-    grown = _grow_sets(set_kinds, m, s, seeds, pool, region, timing, frozenset(), rng)
-    if not grown:
-        return pair
-    sets = np.stack([i[best], j[best]], axis=1)
-    pair_values = set_gain(m, s, sets, "rank", region.within(sets)) / seconds[best]
-    top = max(grown, key=lambda c: c.value)
-    if top.value > pair_values.max():
-        return top.kind, np.array(top.items)
-    return "pair", sets[int(np.argmax(pair_values))]
+class _Truths:
+    """True scores drawn from the fit. With a learned width, each draw also draws the width
+    from what is known about it and redoes the fit's Gaussian for that width: the prior is
+    Normal(0, width²) for every item, so in the covariance's eigenbasis a new width shifts
+    each eigenvalue's inverse."""
 
-
-# ---------------------------------------------------------------- the forecast
-
-
-class _Widths:
-    """The fit's Gaussian redone for another prior width, with the same answers. The prior
-    is Normal(0, width²) for every item, so the answers' precision is the fit's precision
-    minus 1/width², and their pull on the scores is the fit's precision times its mean.
-    Without a learned width, every simulation starts from the fit as it is."""
-
-    def __init__(self, m0: np.ndarray, s0: np.ndarray, sigma: float | None):
-        self.m0, self.s0, self.sigma = m0, s0, sigma or 1.0
-        self.sd = _width_sd(s0, sigma) if sigma else 0.0
+    def __init__(self, m0: np.ndarray, s0: np.ndarray, sigma: float | None, rng, draws: int):
+        k = len(m0)
         w, v = np.linalg.eigh((s0 + s0.T) / 2)
-        if self.sd:
-            # Precision in the same eigenbasis; removed items make it only approximately the
-            # fit's, so eigenvalues are kept positive when the width shifts them.
-            self.prec, self.v = 1.0 / np.clip(w, 1e-12, None), v
-            self.pull = self.prec * (v.T @ m0)  # precision times mean, in the eigenbasis
+        prec = 1.0 / np.clip(w, 1e-12, None)
+        z = rng.standard_normal((draws, k))
+        if sigma:
+            wide = sigma * np.exp(_width_sd(s0, sigma) * rng.standard_normal(draws))
+            lam = np.clip(prec[None, :] + 1.0 / wide[:, None] ** 2 - 1.0 / sigma**2, 1e-9, None)
         else:
-            self.root = v * np.sqrt(np.clip(w, 0.0, None))
+            lam = np.tile(prec, (draws, 1))
+        pull = prec * (v.T @ m0)  # precision times mean, in the eigenbasis
+        self.v, self.inv = v, 1.0 / lam
+        self.mean = (pull[None, :] * self.inv) @ v.T  # (draws, k): each draw's fit
+        self.truth = self.mean + (z * np.sqrt(self.inv)) @ v.T
 
-    def draw(self, rng: np.random.Generator) -> tuple[np.ndarray, np.ndarray, np.ndarray, float]:
-        """(true scores, starting mean, starting covariance, width) for one simulation."""
-        k = len(self.m0)
-        if not self.sd:
-            truth = self.m0 + self.root @ rng.standard_normal(k)
-            return truth, self.m0.copy(), self.s0.copy(), self.sigma
-        wide = self.sigma * math.exp(self.sd * rng.standard_normal())
-        lam = np.clip(self.prec + 1.0 / wide**2 - 1.0 / self.sigma**2, 1e-9, None)
-        m = self.v @ (self.pull / lam)
-        s = (self.v / lam) @ self.v.T
-        truth = m + self.v @ (rng.standard_normal(k) / np.sqrt(lam))
-        return truth, m, (s + s.T) / 2, wide
+    def cov(self) -> np.ndarray:
+        """(draws, k, k): each draw's covariance."""
+        return np.einsum("ie,de,je->dij", self.v, self.inv, self.v, optimize=True)
 
 
 def _width_sd(s0: np.ndarray, sigma: float) -> float:
@@ -479,17 +353,69 @@ def _width_sd(s0: np.ndarray, sigma: float) -> float:
     return 1.0 / math.sqrt(2.0 * settled + 1.0 / DEFAULT_SIGMA_PRIOR.sd**2)
 
 
-def forecast_rounds(*args, **kwargs) -> Forecast:
-    """Rounds left until rankify stops in ``mode``; see ``forecast_steps``."""
-    steps = forecast_steps(*args, **kwargs)
-    while True:
-        try:
-            next(steps)
-        except StopIteration as finished:
-            return finished.value
+def _gap_columns(M: np.ndarray, i: np.ndarray, j: np.ndarray) -> np.ndarray:
+    """M's columns i minus columns j, per draw: (draws, rows, pairs)."""
+    return np.take_along_axis(M, i[:, None, :], axis=2) - np.take_along_axis(
+        M, j[:, None, :], axis=2
+    )
 
 
-def forecast_steps(
+def _answers(S, mean, truth, line, a, b, needs: _Needs, scale, tie: float) -> np.ndarray:
+    """(draws, pairs) answers for each pair the mode needs. ``S`` (draws, k, k) is each
+    draw's covariance, ``mean`` and ``truth`` (draws, k) its fit and true scores, ``line``
+    (draws,) the true score of the last item in the settled part, ``a`` and ``b`` the items
+    of each pair, ``scale`` (draws, 1) how decisive the judge is."""
+    draws = len(S)
+    rows = np.arange(draws)[:, None]
+    n = np.zeros(a.shape)
+    d = scale * (truth[rows, a] - truth[rows, b])
+    est = mean[rows, a] - mean[rows, b]
+    rel = np.broadcast_to(needs.rel, a.shape).copy()
+    level = np.broadcast_to(needs.level, a.shape)
+    tie_ok = np.broadcast_to(needs.tie_ok, a.shape)
+    core = np.flatnonzero(~needs.below)
+    i, j = a[:, core], b[:, core]
+    now = S[rows, i, i] + S[rows, j, j] - 2 * S[rows, i, j]
+    got, m_end, prec = path_answers(
+        est[:, core].ravel(), now.ravel(), d[:, core].ravel(), level[:, core].ravel(),
+        tie_ok[:, core].ravel(), rel[:, core].ravel(), tie,
+    )  # fmt: skip
+    n[:, core] = got.reshape(i.shape)
+    m_end, prec = m_end.reshape(i.shape), prec.reshape(i.shape)
+    # What these answers teach, added to the covariance in one low-rank (Woodbury) update:
+    # precision w along each pair's gap u, so S becomes S - S U (I + W U'S U)^-1 W U'S.
+    w = np.where(np.isfinite(n[:, core]), prec - 1.0 / now, 0.0)  # (draws, c)
+    su = _gap_columns(S, i, j)  # S U: (draws, k, c)
+    usu = _gap_columns(np.swapaxes(su, 1, 2), i, j)  # U'S U: (draws, c, c)
+    eye = np.eye(len(core))[None]
+    x = np.linalg.solve(eye + w[:, :, None] * usu, w[:, :, None] * np.swapaxes(su, 1, 2))
+    var_after = np.diagonal(S, axis1=1, axis2=2) - np.einsum("dkc,dck->dk", su, x)
+    below = needs.below
+    if below.any():
+        # An item is out once it is unlikely to beat whatever ends up last in the settled
+        # part: a line whose value and spread now come from the draws, the spread shrinking
+        # to the edge item's own as the top settles.
+        spread2 = np.full(draws, float(line.std()) ** 2)
+        if needs.edge >= 0:
+            e = int(np.flatnonzero(core == needs.edge)[0])
+            spread2 = np.minimum(spread2, var_after[np.arange(draws), a[:, needs.edge]])
+            # a pair below matters as much as the edge item belongs to the settled part
+            edge_conf = _phi(np.abs(m_end[:, e]) * np.sqrt(prec[:, e]))
+            rel[:, below] = np.maximum(edge_conf, needs.rel_floor)[:, None]
+        rb = b[:, below]
+        start = float(line.mean()) - mean[rows, rb]
+        now = spread2[:, None] + var_after[rows, rb]
+        n[:, below] = path_answers(
+            start.ravel(), now.ravel(), d[:, below].ravel(), level[:, below].ravel(),
+            tie_ok[:, below].ravel(), rel[:, below].ravel(), tie,
+        )[0].reshape(rb.shape)  # fmt: skip
+    return n
+
+
+# ---------------------------------------------------------------- the forecast
+
+
+def forecast_rounds(
     mode: str,
     theta: np.ndarray,
     cov: np.ndarray,
@@ -497,34 +423,24 @@ def forecast_steps(
     looks: dict[int, int],
     seed: int,
     *,
-    timing: Timing | None = None,
     kinds: tuple[str, ...] = PAIRS_ONLY,
     habits: Habits | None = None,
     effort: int = 0,
     past_efforts: Sequence[int] | None = None,
     sigma: float | None = None,
-    width_rest: tuple[float, int] = (0.0, 0),
-    budget_ms: float = 800.0,
-    min_sims: int = 8,
-    max_sims: int = 64,
     cap: int | None = None,
-) -> Generator[None, None, Forecast]:
-    """Rounds left until rankify stops in ``mode``, as a generator that pauses every few
-    simulated rounds and returns the ``Forecast``. A terminal UI runs it between keypresses,
-    so the next round never waits for it. ``active`` holds the positions of the ranked
-    items, and ``looks`` how many answers each position has been in. ``timing`` and
-    ``kinds`` are what the real planner uses. For fatigue, ``effort`` counts the calls the
-    judge has made in the sitting under way (a ranking of k counts as k - 1), and
-    ``past_efforts`` how far into its sitting each call behind the fit was made. ``sigma``
-    is the prior width the fit learned, if it learned one, and ``width_rest`` the removed
-    items' spread and count, which the fit also learns it from.
-
-    Simulations run until ``max_sims``, or until ``budget_ms`` is spent and at least
-    ``min_sims`` are done. Past twice the budget, the running simulation is cut short. A
-    simulation that is cut short, or still asking after ``cap`` rounds, only says "at
-    least this many"; when that leaves the median unknown, the forecast is "more than"."""
+    draws: int = DRAWS,
+    **_planner,
+) -> Forecast:
+    """Rounds left until rankify stops in ``mode``. ``active`` holds the positions of the
+    ranked items, and ``looks`` how many answers each position has been in. ``kinds`` are
+    the round kinds the list allows. For fatigue, ``effort`` counts the calls the judge has
+    made in the sitting under way (a ranking of k counts as k - 1), and ``past_efforts`` how
+    far into its sitting each call behind the fit was made. ``sigma`` is the prior width
+    the fit learned, if it learned one. A draw that needs ``cap`` rounds or more only says
+    "at least that many"; when that leaves the median unknown, the forecast is "more than".
+    Other planner inputs (``timing``) are accepted and not used."""
     t0 = perf_counter()
-    timing = timing or Timing()
     habits = habits or Habits()
     pos = np.asarray(active, dtype=np.int64)
     k = len(pos)
@@ -533,73 +449,46 @@ def forecast_steps(
         return Forecast(0, 0, 0, None, 0, 0, 0.0)
     m0 = np.asarray(theta, dtype=float)[pos]
     s0 = np.asarray(cov, dtype=float)[np.ix_(pos, pos)]
-    looks0 = np.array([looks.get(int(p), 0) for p in pos])
-    widths = _Widths(m0, s0, sigma)
-    rng = np.random.default_rng([seed, 23])
-    # The fit's scores reflect the judge's noise so far; without a record of sittings,
-    # assume one sitting so far.
+    tr = _Truths(m0, s0, sigma, np.random.default_rng([seed, 29]), draws)
+    order = np.argsort(-tr.truth, axis=1, kind="stable")  # (draws, k)
+    ranked = np.take_along_axis(tr.truth, order, axis=1)
+    needs = _needs(mode, k, ranked[:, :-1] - ranked[:, 1:])
+    a = np.take_along_axis(order, needs.upper, axis=1)
+    b = np.take_along_axis(order, needs.lower, axis=1)
+    S = tr.cov()
+    line = ranked[:, needs.top - 1]
+    # The fit's scores already reflect the judge's noise so far; without a record of
+    # sittings, assume one sitting so far.
     past = habits.past_noise(range(effort) if past_efforts is None else past_efforts)
-    # A round that grows sets takes a few milliseconds, so pause after each one.
-    pause_every = _PAUSE_EVERY if tuple(kinds) == PAIRS_ONLY else 1
+    per_round = 1.0 if tuple(kinds) == PAIRS_ONLY else PAIRS_PER_SET_ROUND
+    noise = np.full(draws, habits.noise(effort))
+    n = np.zeros(a.shape)
+    for _ in range(2):  # fatigue: the noise averaged over the calls still to come
+        scale = (habits.sharpness * past / noise)[:, None]
+        n = _answers(S, tr.mean, tr.truth, line, a, b, needs, scale, habits.tie)
+        calls = np.minimum(n.sum(axis=1), cap * per_round)
+        noise = habits.noise_over(float(effort), calls)
+    owed = sum(max(0, MIN_LOOKS - looks.get(int(p), 0)) for p in pos)
+    rounds = np.maximum(n.sum(axis=1) / per_round, owed / 2.0)  # first looks are answers too
+    capped = rounds >= cap
+    # How the answers fall spreads each draw's count: a lognormal around it.
+    x = np.concatenate([[0.0], np.geomspace(1.0, cap, 240)])
+    zero = rounds < 0.5
+    safe = np.where(zero | capped, 1.0, rounds)
+    t = (np.log(np.maximum(x, 0.5))[None, :] - np.log(safe)[:, None]) / LUCK
+    cdf = np.where(zero[:, None], 1.0, np.where(capped[:, None], 0.0, _phi(t))).mean(axis=0)
 
-    def elapsed() -> float:
-        return (perf_counter() - t0) * 1000
+    def quantile(q: float) -> int | None:
+        at = np.flatnonzero(cdf >= q)
+        return None if len(at) == 0 else math.ceil(x[at[0]])
 
-    done: list[float] = []  # rounds, or infinity where a simulation was cut short
-    lower: list[int] = []  # rounds reached by simulations cut short: at least that many left
-    while len(done) < max_sims and not (len(done) >= min_sims and elapsed() > budget_ms):
-        truth, m1, s1, wide = widths.draw(rng)
-        belief = _Belief(m1, s1, rng, wide if sigma else None, width_rest)
-        seen = looks0.copy()
-        m, s = belief.m, belief.s
-        rounds, calls, cut = 0, effort, False
-        while True:
-            if rounds >= cap or (rounds % 16 == 0 and elapsed() > 2 * budget_ms):
-                cut = True
-                break
-            belief.due()
-            order = np.argsort(-np.round(m, 9), kind="stable")
-            # The real stop rules use the exact normal curve; an approximation here moved
-            # the thresholds enough to stop simulations a round early, or run them long.
-            nb = stop.neighbours(m, s, order)
-            planned = _plan(mode, order, m, s, nb, seen, belief.draws, timing, kinds, rng)
-            if planned is None:
-                break
-            kind, items = planned
-            scale = habits.sharpness * past / habits.noise(calls)
-            if kind == "pair":
-                i, j = int(items[0]), int(items[1])
-                said = _answer_pair(truth, i, j, habits, scale, rng)
-                if said == 0:
-                    belief.tie(i, j, habits.tie)
-                else:
-                    belief.pair(i, j, said > 0)
-            else:
-                belief.choice(items, _answer_set(truth, items, kind, scale, rng))
-            seen[items] += 1
-            calls += len(items) - 1
-            rounds += 1
-            if rounds % pause_every == 0:
-                yield
-        done.append(math.inf if cut else float(rounds))
-        if cut:
-            lower.append(rounds)
-        yield  # also between simulations: near the end, most stop within a few rounds
-        if elapsed() > 2 * budget_ms:
-            break
-    c = np.sort(np.array(done))
-
-    def quantile(q: float, method: str) -> int | None:
-        v = float(np.quantile(c, q, method=method))
-        return None if math.isinf(v) else int(v)
-
-    median = quantile(0.5, "higher")
+    median = quantile(0.5)
     return Forecast(
         median=median,
-        low=quantile(LOW_Q, "lower"),
-        high=quantile(HIGH_Q, "higher"),
-        at_least=min(lower) if lower and median is None else None,
-        sims=len(c),
-        capped=len(lower),
-        ms=elapsed(),
+        low=quantile(LOW_Q),
+        high=quantile(HIGH_Q),
+        at_least=int(cap) if median is None else None,
+        draws=draws,
+        capped=int(capped.sum()),
+        ms=(perf_counter() - t0) * 1000,
     )

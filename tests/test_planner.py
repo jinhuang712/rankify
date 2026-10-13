@@ -219,3 +219,21 @@ def test_why_explains_a_planned_round_and_mode_can_be_overridden(tmp_path):
     assert rk.why("w", json.loads(result.stdout)["round"]).mode == "exact"
     with pytest.raises(RankifyError):
         rk.next_round("w", mode="fastest")
+
+
+def test_before_giving_up_every_item_still_in_play_gets_six_looks(monkeypatch):
+    """When even the best pair looks worth too little, the planner first gives each item
+    still in play TOPUP_LOOKS answers, least-seen first; only then is nothing worth asking."""
+    from rankify.engine import planner
+
+    monkeypatch.setattr(planner, "FLOOR_BITS", 100.0)  # nothing ever looks worth asking
+    theta = np.linspace(2.0, -2.0, 12)
+    cov = np.eye(12) * 1.0
+    ranks = [(p, max(1, p - 3), min(12, p + 5)) for p in range(12)]
+    looks = dict.fromkeys(range(12), planner.TOPUP_LOOKS)
+    looks[5] = 2  # in play, barely seen
+    plan = planner.plan_round("stable", theta, cov, ranks, planner.Timing(), 1, looks)
+    assert plan.reason == "another look" and 5 in plan.chosen.items
+    looks[5] = planner.TOPUP_LOOKS
+    plan = planner.plan_round("stable", theta, cov, ranks, planner.Timing(), 1, looks)
+    assert plan.chosen is None and plan.reason == "nothing worth asking"

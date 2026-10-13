@@ -107,7 +107,7 @@ def test_answer_to_next_round_under_50ms(tmp_path):
 
 def test_terminal_ui_shows_the_next_round_without_a_visible_wait():
     """In `rankify play` on 20 items, from an answer key to the next round drawn, while
-    rounds-left forecasts run between keypresses."""
+    the rounds-left forecast worked out after each round."""
     import asyncio
 
     from rankify.tui import PlayApp

@@ -6,7 +6,7 @@ from hypothesis import strategies as st
 
 from rankify.engine.fit import fit_pairs, initial_x
 from rankify.engine.model import A_WINS, B_WINS, TIE, Pairs, Prior, grad_hess, log_posterior
-from rankify.engine.stats import SCORE_SCALE, summarize
+from rankify.engine.stats import SCORE_SCALE, could_be, reach, summarize
 
 
 def simulate_pairs(theta, m, rng, *, bias=0.0, nu=0.0):
@@ -130,6 +130,30 @@ def test_summary_could_be_widens_when_unsure():
     stats = summarize(theta, cov, np.array([0, 1, 2]), seed=7)
     assert all(s.rank_lo == 1 and s.rank_hi == 3 for s in stats)
     assert all(0.5 < s.confidence < 0.6 for s in stats[:-1])
+
+
+def test_could_be_is_the_narrowest_run_holding_90_percent():
+    """Rank 1 in 93 draws of 100 and rank 2 in 7: the central range rounded outward to
+    #1-#2; the narrowest run holding 90% is #1 alone. A spread item gets a contiguous run."""
+    sure = np.array([1] * 93 + [2] * 7)
+    spread = np.array([1] * 5 + [2] * 30 + [3] * 40 + [4] * 20 + [5] * 5)
+    ranks = np.stack([sure, 3 - sure, *(np.full(100, r) for r in (3, 4, 5))], axis=1)
+    lo, hi = could_be(ranks)
+    assert (lo[0], hi[0]) == (1, 1)
+    lo, hi = could_be(np.stack([spread, *(np.full(100, 1) for _ in range(4))], axis=1))
+    assert (lo[0], hi[0]) == (2, 4)  # 90% of the draws, in the fewest ranks
+
+
+def test_could_be_is_never_wider_than_the_range_stopping_uses():
+    """Both hold at least 90% of an item's rank draws; Could be is the narrowest such run,
+    so it is never wider, though it may sit off-centre."""
+    rng = np.random.default_rng(4)
+    x = np.linspace(1.0, -1.0, 12) + rng.standard_normal((1000, 12)) * 0.7
+    ranks = np.empty_like(x, dtype=np.int64)
+    ranks[np.arange(1000)[:, None], np.argsort(-x, axis=1)] = np.arange(1, 13)
+    lo, hi = could_be(ranks)
+    far_lo, far_hi = reach(ranks)
+    assert np.all(hi - lo <= far_hi - far_lo) and np.any(hi - lo < far_hi - far_lo)
 
 
 def test_summary_is_reproducible_with_the_same_seed():

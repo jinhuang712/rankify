@@ -2,8 +2,8 @@
 
 One round at a time. Type the numbers: one for a pair or a pick, all but the last for an
 ordering (which can also be arranged with the arrow keys and Space). `t` is "can't decide",
-`u` undoes, `r` shows the ranking, `q` quits. Rounds left are forecast a little at a time
-between keypresses, so the next round never waits for them.
+`u` undoes, `r` shows the ranking, `q` quits. Rounds left are worked out just after each
+round is drawn, so the round never waits for them.
 """
 
 import asyncio
@@ -16,7 +16,7 @@ from textual.binding import Binding
 from textual.containers import Vertical
 from textual.widgets import DataTable, Footer, Static
 
-from rankify.engine.forecast import forecast_steps
+from rankify.engine.forecast import forecast_rounds
 from rankify.service import NothingToAsk, Rankify, RankifyError, RoundView
 
 
@@ -236,16 +236,8 @@ class PlayApp(App):
 
     @work(exclusive=True, group="forecast")
     async def forecast_worker(self, round_no: int, args: dict) -> None:
-        # Between keypresses, a few simulated rounds at a time. (A thread was tried first:
-        # sharing Python's interpreter lock with it made each round take about 0.8 s to show.)
-        steps = forecast_steps(**args)
-        while True:
-            try:
-                next(steps)
-            except StopIteration as finished:
-                self.show_forecast(round_no, finished.value)
-                return
-            await asyncio.sleep(0)
+        await asyncio.sleep(0)  # let the round show first; the forecast takes milliseconds
+        self.show_forecast(round_no, forecast_rounds(**args))
 
     def show_forecast(self, round_no: int, f) -> None:
         if self.view is None or self.view.round != round_no:

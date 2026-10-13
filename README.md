@@ -72,8 +72,8 @@ The books, papers and software that rankify builds on or measures itself against
 - Bradley, R. A. & Terry, M. E. (1952). Rank analysis of incomplete block designs: the method of paired comparisons. *Biometrika*. The pair model at rankify's core.
 - Luce, R. D. (1959). *Individual Choice Behavior: A Theoretical Analysis*. Wiley. The choice axiom behind "pick the best of these".
 - Plackett, R. L. (1975). The analysis of permutations. *Applied Statistics*. Extends the model to full orderings ("put these in order").
-- † Yellott, J. I. (1977). [The relationship between Luce's choice axiom, Thurstone's theory of comparative judgment, and the double exponential distribution](https://swov.nl/en/publicatie/relationship-between-luces-choice-axiom-thurstones-theory-comparitive-judgment-and). *Journal of Mathematical Psychology* 15. Luce's model is what you get by adding Gumbel noise to each score and taking the best; the rounds-left forecast draws simulated picks and orderings this way.
-- Davidson, R. R. (1970). On extending the Bradley–Terry model to accommodate ties in paired comparison experiments. *Journal of the American Statistical Association*. How rankify counts "can't decide".
+- † Yellott, J. I. (1977). [The relationship between Luce's choice axiom, Thurstone's theory of comparative judgment, and the double exponential distribution](https://swov.nl/en/publicatie/relationship-between-luces-choice-axiom-thurstones-theory-comparitive-judgment-and). *Journal of Mathematical Psychology* 15. Luce's model is what you get by adding Gumbel noise to each score and taking the best; the benchmark's judges answer picks and orderings this way.
+- Davidson, R. R. (1970). On extending the Bradley–Terry model to accommodate ties in paired comparison experiments. *Journal of the American Statistical Association*. How rankify counts "can't decide". The rounds-left forecast uses its expected score and information to work out how many answers a pair needs.
 - Debreu, G. (1960). Review of R. D. Luce, *Individual Choice Behavior*. *American Economic Review*. Shows how near-identical options break Luce's axiom.
 - Tversky, A. (1972). Elimination by aspects: a theory of choice. *Psychological Review*. Explains why similar items split votes.
 
@@ -82,7 +82,7 @@ The books, papers and software that rankify builds on or measures itself against
 - Elo, A. E. (1978). *The Rating of Chessplayers, Past and Present*. Arco.
 - Glickman, M. E. (1999). Parameter estimation in large dynamic paired comparison experiments. *Applied Statistics*. The Glicko system, the first to give ratings a deviation.
 - Glickman, M. E. (2001). Dynamic paired comparison models with stochastic variances. *Journal of Applied Statistics*. Glicko-2.
-- Herbrich, R., Minka, T. & Graepel, T. (2007). TrueSkill: a Bayesian skill rating system. *Advances in Neural Information Processing Systems 19*. Its moment-matching update is also how rankify's rounds-left forecast updates a simulated fit after each simulated answer.
+- Herbrich, R., Minka, T. & Graepel, T. (2007). TrueSkill: a Bayesian skill rating system. *Advances in Neural Information Processing Systems 19*. Its moment-matching update was how rankify's first rounds-left forecast, a simulation, updated its fit after each simulated answer.
 - Weng, R. C. & Lin, C.-J. (2011). A Bayesian approximation method for online ranking. *Journal of Machine Learning Research*. The method behind openskill.
 - † LMSYS (2023). [Chatbot Arena: new models & Elo system update](https://lmsys.org/blog/2023-12-07-leaderboard). Chatbot Arena moved from online Elo to a Bradley–Terry fit for more stable ratings.
 
@@ -110,6 +110,9 @@ The books, papers and software that rankify builds on or measures itself against
 
 - MacKay, D. J. C. (1992). Bayesian interpolation. *Neural Computation*. The evidence framework: rankify learns its prior width by maximizing the evidence.
 - Dempster, A. P., Laird, N. M. & Rubin, D. B. (1977). Maximum likelihood from incomplete data via the EM algorithm. *Journal of the Royal Statistical Society, Series B*. The algorithm that finds that width.
+- † Tierney, L. & Kadane, J. B. (1986). [Accurate approximations for posterior moments and marginal densities](https://doi.org/10.1080/01621459.1986.10478240). *Journal of the American Statistical Association* 81(393). The Laplace approximation behind rankify's fit; the rounds-left forecast follows where it moves after n more answers.
+- † Woodbury, M. A. (1950). [Inverting modified matrices](https://en.wikipedia.org/wiki/Woodbury_matrix_identity). Memorandum Report 42, Statistical Research Group, Princeton University. How the forecast adds many pairs' answers to the fit's covariance in one step.
+- Abramowitz, M. & Stegun, I. A. (1964). *Handbook of Mathematical Functions*. National Bureau of Standards. Formula 7.1.26, the forecast's normal curve (measured error under 1e-7).
 - Aitken, A. C. (1926). On Bernoulli's numerical solution of algebraic equations. *Proceedings of the Royal Society of Edinburgh*. Aitken's acceleration, tried first to speed up the EM steps. It ran the wrong way when the best width was far from the start, so rankify uses secant steps that must agree with the EM step.
 
 ### Software

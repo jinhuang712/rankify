@@ -597,7 +597,7 @@ class ForecastRow:
     low: int | None
     high: int | None
     at_least: int | None
-    sims: int
+    draws: int
     ms: float
     created_at: str
 
@@ -617,7 +617,7 @@ def insert_forecast(
             f.low,
             f.high,
             f.at_least,
-            f.sims,
+            f.draws,
             f.ms,
             engine_version,
             now(),
@@ -641,7 +641,7 @@ def latest_forecast(
         row["low"],
         row["high"],
         row["at_least"],
-        row["sims"],
+        row["sims"],  # the column dates from when the forecast was a simulation
         row["ms"],
         row["created_at"],
     )

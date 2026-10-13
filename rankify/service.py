@@ -182,7 +182,8 @@ class Refit:
     ms: float
     theta: np.ndarray | None = None  # scores and covariance, for methods that have them
     theta_cov: np.ndarray | None = None
-    ranks: list[tuple[int, int, int]] | None = None  # (position, rank_lo, rank_hi), best first
+    # (position, reach_lo, reach_hi), best first: the ranges the stopping rules use
+    ranks: list[tuple[int, int, int]] | None = None
     history: list = field(default_factory=list)  # pair answers, as item positions
     set_rounds: list = field(default_factory=list)  # answered pick and rank rounds
     unanswered_sets: list = field(default_factory=list)  # sets the judge couldn't decide
@@ -191,7 +192,7 @@ class Refit:
 @dataclass(frozen=True)
 class ForecastView:
     """Rounds left until the mode's target, as a 10–90% range around the median. When too
-    many simulations didn't finish, the median is unknown and ``at_least`` gives a floor."""
+    many draws need more than the cap, the median is unknown and ``at_least`` gives a floor."""
 
     list: str
     mode: str
@@ -199,7 +200,7 @@ class ForecastView:
     low: int | None
     high: int | None
     at_least: int | None
-    sims: int
+    draws: int
     ms: float
 
     def as_dict(self) -> dict:
@@ -540,11 +541,9 @@ class Rankify:
             timing=plan["timing"],
         )
 
-    def forecast(
-        self, slug: str, mode: str | None = None, *, budget_ms: float = 800.0
-    ) -> ForecastView | None:
-        """Rounds left until ``mode``'s target (the list's mode by default), by simulating the
-        rest of the session. A forecast for the same answers, items and mode is reused.
+    def forecast(self, slug: str, mode: str | None = None) -> ForecastView | None:
+        """Rounds left until ``mode``'s target (the list's mode by default), from the answers
+        each pair it needs will take. A forecast for the same answers, items and mode is reused.
         ``None`` for methods and lists the planner doesn't drive."""
         lst = self._list(slug)
         mode = mode or lst.settings["mode"]
@@ -563,7 +562,7 @@ class Rankify:
                 f.low,
                 f.high,
                 f.at_least,
-                f.sims,
+                f.draws,
                 f.ms,
             )
 
@@ -574,7 +573,7 @@ class Rankify:
             return view(saved)
         args = self.forecast_inputs(slug, mode)
         assert args is not None
-        f = forecast_rounds(**args, budget_ms=budget_ms)
+        f = forecast_rounds(**args)
         with Transaction(self.conn):
             store.insert_forecast(self.conn, lst.id, upto, active, mode, f, version)
         return view(f)
@@ -608,7 +607,6 @@ class Rankify:
             ),
             **_sittings(store.effective_rounds(self.conn, lst.id), judge),
             "sigma": r.params.get("sigma"),
-            "width_rest": _rest_spread(r.theta, r.theta_cov, [p for p, _, _ in r.ranks]),
         }
 
     def calibrate(self, slugs: str | Sequence[str]) -> JudgeProfile:
@@ -948,7 +946,7 @@ class Rankify:
                 )
                 for s in stats
             ]
-            ranks = [(s.index, s.rank_lo, s.rank_hi) for s in stats]
+            ranks = [(s.index, s.reach_lo, s.reach_hi) for s in stats]  # for stopping
             nb = stop.neighbours(theta, cov, [s.index for s in stats])
             params["targets"] = {m: stop.target_reached(m, nb, ranks) for m in MODES}
             if method == "ford-johnson":
@@ -1130,13 +1128,6 @@ SITTING_GAP = timedelta(minutes=30)  # a longer pause starts a new sitting
 SHARPNESS_ANSWERS = 200  # the judge's latest answers that measure their sharpness
 SHARPNESS_SD = 0.5  # prior sd of its log: about 1, unless the answers say otherwise
 _SHARPNESS_GRID = np.exp(np.linspace(np.log(0.25), np.log(8.0), 57))
-
-
-def _rest_spread(theta: np.ndarray, cov: np.ndarray, active: list[int]) -> tuple[float, int]:
-    """The removed items' part of the fit's spread (sum of squared scores plus variances)
-    and their count. The fit learns its width over every item, removed ones too."""
-    rest = np.setdiff1d(np.arange(len(theta)), np.asarray(active, dtype=np.int64))
-    return float(theta[rest] @ theta[rest] + np.trace(cov[np.ix_(rest, rest)])), len(rest)
 
 
 def _sharpness(answers) -> float:

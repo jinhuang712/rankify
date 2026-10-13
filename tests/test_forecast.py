@@ -1,4 +1,4 @@
-"""Rounds left: the simulated rest of the session."""
+"""Rounds left: the answers each pair the mode needs will take."""
 
 import json
 import math
@@ -10,84 +10,94 @@ from typer.testing import CliRunner
 
 from rankify import store
 from rankify.cli.main import app
-from rankify.engine.fit import DEFAULT_SIGMA_PRIOR, fit_pairs, fit_pairs_learning_sigma
+from rankify.engine.fit import DEFAULT_SIGMA_PRIOR
 from rankify.engine.forecast import (
     Habits,
-    _answer_pair,
-    _Belief,
-    _choice_step,
-    _rewidth,
-    _tie_step,
-    _update,
     _width_sd,
     forecast_rounds,
-    forecast_steps,
+    later_bits,
+    path_answers,
+    score,
 )
-from rankify.engine.model import A_WINS, Choices, Pairs, Prior
-from rankify.engine.planner import ALL_KINDS
+from rankify.engine.planner import ALL_KINDS, order_information_over
 from rankify.service import _sharpness, _sittings
 
 from .conftest import SimulatedJudge, run_rounds
 
-FIXED = {"budget_ms": 1e9, "max_sims": 16}  # the same number of simulations on any machine
+
+def _path(m0, v0, d, level=0.95, tie_ok=False, rel=1.0, tie=0.0):
+    one = np.ones(1)
+    n, m, prec = path_answers(
+        m0 * one, v0 * one, d * one, level * one, np.array([tie_ok]), rel * one, tie
+    )
+    return float(n[0]), float(m[0]), float(prec[0])
 
 
-def test_one_answer_moves_the_belief_to_the_exact_posterior_mean():
-    """For a probit answer the closed-form step is exact: the gap d = theta_0 - theta_1 has
-    prior variance v, and after "0 beat 1" its mean is v / sqrt(c^2 + v) * sqrt(2 / pi).
-    It also lands near a full (logistic, posterior-mode) refit of the same answer."""
-    prior = Prior(sigma=1.5)
-    m, s = np.zeros(3), np.eye(3) * prior.sigma**2
-    _update(m, s, 0, 1, i_won=True)
-    v, c = 2 * prior.sigma**2, 1.702
-    assert m[0] - m[1] == pytest.approx(v / math.sqrt(c**2 + v) * math.sqrt(2 / math.pi))
-    assert m[2] == 0 and s[2, 2] == prior.sigma**2  # an item not shown is untouched
-    fit = fit_pairs(3, Pairs.of([0], [1], [A_WINS]), prior, ties=False, bias=False)
-    np.testing.assert_allclose(m, fit.theta, atol=0.15)
-    np.testing.assert_allclose(np.diag(s), np.diag(fit.theta_cov), atol=0.15)
+def test_the_score_and_its_slope_are_davidsons():
+    """G is the derivative of log(e^(m/2) + e^(-m/2) + nu), the model's expected score, and
+    H is G's slope: the information of one answer. Without ties H is p(1 - p)."""
+    m, nu, h = np.linspace(-4, 4, 9), 0.3, 1e-5
+
+    def log_z(x):
+        return np.log(np.exp(x / 2) + np.exp(-x / 2) + nu)
+
+    g, slope = score(m, nu)
+    np.testing.assert_allclose(g, (log_z(m + h) - log_z(m - h)) / (2 * h), atol=1e-8)
+    np.testing.assert_allclose(
+        slope, (score(m + h, nu)[0] - score(m - h, nu)[0]) / (2 * h), atol=1e-7
+    )
+    p = 1 / (1 + np.exp(-m))
+    np.testing.assert_allclose(score(m, 0.0)[1], p * (1 - p), atol=1e-12)
 
 
-@pytest.mark.parametrize(
-    ("sigma", "shown", "answer"),
-    [
-        (1.5, [0, 1, 2, 3], [2, 0, 3, 1]),  # put these in order
-        (2.5, [0, 1, 2, 3, 4], [4]),  # a pick, under wide uncertainty
-    ],
-)
-def test_a_set_answer_moves_the_belief_to_the_full_refit(sigma, shown, answer):
-    """From the prior, the update is the same posterior mode and Laplace covariance as a
-    full refit of the same answer under Plackett–Luce, even when the answer surprises."""
-    prior = Prior(sigma=sigma)
-    m, s = np.zeros(6), np.eye(6) * sigma**2
-    _choice_step(m, s, np.array(shown), np.array(answer))
-    fit = fit_pairs(6, Pairs.of([], [], []), prior, ties=False, bias=False,
-                    choices=Choices.of([(shown, answer)]))  # fmt: skip
-    np.testing.assert_allclose(m, fit.theta, atol=1e-6)
-    np.testing.assert_allclose(s, fit.theta_cov, atol=1e-6)
-    assert m[5] == 0
+def test_the_path_is_the_fits_estimate_after_those_answers():
+    """After n answers at the judge's rates, the estimate solves the Laplace equation
+    (m - m0) / v0 = n (drive - G(m)), and the precision is 1 / v0 + n H(m)."""
+    m0, v0, d, nu = 0.2, 1.5, 1.0, 0.2
+    n, m, prec = _path(m0, v0, d, level=0.99, tie=nu)
+    a, b = math.exp(d / 2), math.exp(-d / 2)
+    drive = (a - b) / (2 * (a + b + nu))
+    g, h = score(np.array([m]), nu)
+    assert 0 < n < math.inf and m0 < m < d
+    at_m = (m - m0) / v0 / (drive - g[0])  # the answers that put the estimate at m
+    assert prec == pytest.approx(1 / v0 + at_m * h[0], rel=1e-9)
+    assert at_m / 1.05 < n <= at_m  # read halfway between the last two points
 
 
-def test_cant_decide_pulls_two_items_together_without_flipping_them():
-    """The mode of a "can't decide" under wide uncertainty, checked on a fine grid. A single
-    Newton step from the mean used to overshoot here and swap the two items."""
-    nu, v = 0.2, 12.0
-    m, s = np.array([1.5, -1.5, 0.0]), np.eye(3) * v
-    _tie_step(m, s, 0, 1, nu)
-    grid = np.linspace(-6, 6, 1201)
-    ua, ub = np.meshgrid(grid, grid, indexing="ij")
-    tie = np.log(nu) + (ua + ub) / 2
-    log_post = tie - np.logaddexp(np.logaddexp(ua, ub), tie)
-    log_post -= ((ua - 1.5) ** 2 + (ub + 1.5) ** 2) / (2 * v)
-    a, b = np.unravel_index(np.argmax(log_post), log_post.shape)
-    assert m[0] - m[1] == pytest.approx(grid[a] - grid[b], abs=0.03)
-    assert 0 < m[0] - m[1] < 3.0 and s[0, 0] < v and m[2] == 0.0
+def test_a_pair_already_confident_needs_no_answers():
+    assert _path(3.0, 0.25, 3.0)[0] == 0.0
 
 
-def test_cant_decide_comes_at_davidsons_rate():
-    rng = np.random.default_rng(1)
-    truth, nu = np.zeros(2), 0.5
-    said = [_answer_pair(truth, 0, 1, Habits(tie=nu), 1.0, rng) for _ in range(20000)]
-    assert np.mean(np.array(said) == 0) == pytest.approx(nu / (2 + nu), abs=0.01)
+def test_a_clear_judge_settles_a_pair_in_a_few_answers():
+    """A judge who always picks the same item: a handful of answers settle it, as the real
+    fit does. The information at the true gap (tiny when answers are predictable) would
+    ask for hundreds."""
+    n, _, _ = _path(0.0, 1.0, 12.0)
+    assert 2 <= n <= 8
+
+
+def test_closer_pairs_take_more_answers():
+    needed = [_path(0.0, 1.0, d)[0] for d in (2.0, 1.0, 0.5, 0.0)]
+    assert needed == sorted(needed) and needed[0] > 0
+
+
+def test_equal_items_end_as_a_tie_or_at_the_floor():
+    """Two equal items are never confidently ordered. Where a tie counts, a confident tie
+    can end it; either way the floor does, sooner if the pair matters less, at once if it
+    doesn't matter at all."""
+    tie = _path(0.0, 1.0, 0.0, tie_ok=True, tie=0.3)[0]
+    floor = _path(0.0, 1.0, 0.0, tie=0.3)[0]
+    assert math.isfinite(tie) and tie <= floor
+    assert _path(0.0, 1.0, 0.0, rel=0.5, tie=0.3)[0] < floor
+    assert _path(0.0, 1.0, 0.0, rel=0.0, tie=0.3)[0] == 0.0
+
+
+def test_the_floor_table_decides_as_the_exact_sum_does():
+    rng = np.random.default_rng(2)
+    mu, var = rng.uniform(-6, 6, 3000), 10 ** rng.uniform(-3.5, 1.2, 3000)
+    table = later_bits(mu, var) < 0.1
+    exact = order_information_over(mu, var, 8) < 0.1
+    assert np.mean(table != exact) < 0.005
 
 
 def test_the_width_is_as_unsure_as_its_hyperprior_before_any_answers():
@@ -97,56 +107,41 @@ def test_the_width_is_as_unsure_as_its_hyperprior_before_any_answers():
 
 def test_orderings_finish_in_fewer_rounds_than_pairs():
     theta, cov = np.zeros(10), np.eye(10) * 2.25
-    pairs = forecast_rounds("stable", theta, cov, list(range(10)), {}, 3, **FIXED)
-    mixed = forecast_rounds("stable", theta, cov, list(range(10)), {}, 3, kinds=ALL_KINDS,
-                            **FIXED)  # fmt: skip
+    pairs = forecast_rounds("stable", theta, cov, list(range(10)), {}, 3)
+    mixed = forecast_rounds("stable", theta, cov, list(range(10)), {}, 3, kinds=ALL_KINDS)
     assert mixed.median < pairs.median
 
 
 def test_a_tired_judge_needs_more_rounds():
     """Tiredness only: the same list, a fresh judge against one already 30 calls into a
-    sitting whose noise grows 2% per call, over several seeds."""
-    theta, cov = np.linspace(2, -2, 8), np.eye(8) * 2.25
+    sitting whose noise grows 2% per call."""
+    theta, cov = np.linspace(2, -2, 8), np.eye(8) * 0.5
     looks = dict.fromkeys(range(8), 2)
-    fresh = Habits(fatigue=0.0)
-    tired = Habits(fatigue=0.02)
 
     def rounds(habits, effort):
-        kw = {"habits": habits, "effort": effort, "past_efforts": [], **FIXED}
-        return sum(
-            forecast_rounds("exact", theta, cov, list(range(8)), looks, seed, **kw).median
-            for seed in range(4)
-        )
+        kw = {"habits": habits, "effort": effort, "past_efforts": []}
+        return forecast_rounds("exact", theta, cov, list(range(8)), looks, 1, **kw).median
 
-    assert rounds(tired, 30) > 1.1 * rounds(fresh, 0)
+    assert rounds(Habits(fatigue=0.02), 30) > 1.1 * rounds(Habits(fatigue=0.0), 0)
 
 
-def test_the_simulated_fit_learns_its_width_as_the_real_one_does():
-    """Re-learning the width from a fit that has already learned it changes nothing, and
-    redoing a fit for the same width gives it back."""
-    rng = np.random.default_rng(3)
-    truth = rng.normal(0, 2.0, 12)
-    a, b, y = [], [], []
-    for _ in range(80):
-        i, j = rng.choice(12, 2, replace=False)
-        a.append(i)
-        b.append(j)
-        y.append(A_WINS if rng.random() < 1 / (1 + np.exp(truth[j] - truth[i])) else 1)
-    fit = fit_pairs_learning_sigma(12, Pairs.of(a, b, y), Prior(sigma=1.5), ties=False, bias=False)
-    m, s = fit.theta.copy(), fit.theta_cov.copy()
-    _rewidth(m, s, fit.sigma, fit.sigma)
-    np.testing.assert_allclose(m, fit.theta, atol=1e-12)
-    belief = _Belief(m, s, rng, fit.sigma)
-    belief.relearn(steps=10)
-    assert belief.sigma == pytest.approx(fit.sigma, rel=1e-6)
-    for start in (0.5, 4.0):  # from another width, it finds its way back
-        m2, s2 = fit.theta.copy(), fit.theta_cov.copy()
-        _rewidth(m2, s2, fit.sigma, start)
-        assert abs(m2 - fit.theta).max() > 0.1
-        belief = _Belief(m2, s2, rng, start)
-        belief.relearn(steps=200)
-        assert belief.sigma == pytest.approx(fit.sigma, rel=0.05)
-        np.testing.assert_allclose(m2, fit.theta, atol=0.05)
+def test_a_sharper_judge_needs_fewer_rounds():
+    theta, cov = np.linspace(2, -2, 8), np.eye(8) * 0.5
+    looks = dict.fromkeys(range(8), 2)
+
+    def rounds(sharpness):
+        habits = Habits(sharpness=sharpness)
+        return forecast_rounds("exact", theta, cov, list(range(8)), looks, 1, habits=habits).median
+
+    assert rounds(3.0) < rounds(1.0)
+
+
+def test_long_lists_count_items_that_are_already_out_of_reach_as_done():
+    """With 60 items and the top three clear, the others need no more answers for Quick."""
+    theta = np.concatenate([[6.0, 5.0, 4.0], np.linspace(0, -3, 57)])
+    cov = np.eye(60) * 0.3
+    f = forecast_rounds("quick", theta, cov, list(range(60)), dict.fromkeys(range(60), 3), 1)
+    assert f.median is not None and f.median <= 5
 
 
 def test_sharpness_is_about_1_for_a_judge_the_model_describes_and_more_for_a_perfect_one():
@@ -188,54 +183,37 @@ def test_fatigue_resets_between_sittings():
 def test_a_settled_list_has_no_rounds_left():
     theta = np.array([6.0, 4.0, 2.0, 0.0])
     cov = np.eye(4) * 1e-4
-    f = forecast_rounds("exact", theta, cov, [0, 1, 2, 3], dict.fromkeys(range(4), 5), 1, **FIXED)
+    f = forecast_rounds("exact", theta, cov, [0, 1, 2, 3], dict.fromkeys(range(4), 5), 1)
     assert (f.median, f.low, f.high) == (0, 0, 0)
 
 
 def test_the_forecast_is_repeatable_and_shrinks_as_answers_come_in():
     theta, cov = np.zeros(8), np.eye(8) * 2.25
-    early = forecast_rounds("stable", theta, cov, list(range(8)), {}, 7, **FIXED)
-    again = forecast_rounds("stable", theta, cov, list(range(8)), {}, 7, **FIXED)
+    early = forecast_rounds("stable", theta, cov, list(range(8)), {}, 7)
+    again = forecast_rounds("stable", theta, cov, list(range(8)), {}, 7)
     assert (early.median, early.low, early.high) == (again.median, again.low, again.high)
     assert early.low <= early.median <= early.high
     spread = np.linspace(3, -3, 8)
     later = forecast_rounds(
-        "stable", spread, np.eye(8) * 0.3, list(range(8)), dict.fromkeys(range(8), 4), 7, **FIXED
+        "stable", spread, np.eye(8) * 0.3, list(range(8)), dict.fromkeys(range(8), 4), 7
     )
     assert later.median < early.median
 
 
-def test_the_forecast_pauses_between_simulations_too():
-    """Near the end of a session, simulations stop within a round or two; the generator
-    must still pause between them, or the terminal UI would wait for the whole forecast."""
-    theta, cov = np.array([6.0, 4.0, 2.0, 0.0]), np.eye(4) * 1e-4
-    steps = forecast_steps("exact", theta, cov, [0, 1, 2, 3], dict.fromkeys(range(4), 5), 1,
-                           **FIXED)  # fmt: skip
-    pauses = 0
-    while True:
-        try:
-            next(steps)
-            pauses += 1
-        except StopIteration as finished:
-            assert pauses >= finished.value.sims == 16
-            break
-
-
-def test_simulations_cut_short_give_a_floor_not_a_guess():
-    f = forecast_rounds("exact", np.zeros(10), np.eye(10) * 2.25, list(range(10)), {}, 1, cap=3,
-                        **FIXED)  # fmt: skip
-    assert f.median is None and f.at_least == 3 and f.capped == f.sims
+def test_draws_past_the_cap_give_a_floor_not_a_guess():
+    f = forecast_rounds("exact", np.zeros(10), np.eye(10) * 2.25, list(range(10)), {}, 1, cap=3)
+    assert f.median is None and f.at_least == 3 and f.capped == f.draws
 
 
 def test_service_reuses_a_forecast_until_the_list_changes(rk, conn):
     names = [f"item-{k}" for k in range(6)]
     rk.create_list("f", "F", names, seed=1, mode="quick")
-    first = rk.forecast("f", budget_ms=200)
+    first = rk.forecast("f")
     assert rk.forecast("f").median == first.median
     assert conn.execute("SELECT COUNT(*) FROM forecasts").fetchone()[0] == 1
     run_rounds(rk, "f", SimulatedJudge({n: float(k) for k, n in enumerate(names)}, 2), 4)
-    rk.forecast("f", budget_ms=200)
-    rk.forecast("f", mode="exact", budget_ms=200)
+    rk.forecast("f")
+    rk.forecast("f", mode="exact")
     assert conn.execute("SELECT COUNT(*) FROM forecasts").fetchone()[0] == 3
 
 
@@ -254,7 +232,7 @@ def test_next_and_forecast_commands_show_rounds_left(tmp_path):
     out = runner.invoke(app, ["--db", db, "next", "f"]).output
     assert "rounds left" in out
     data = json.loads(runner.invoke(app, ["--db", db, "forecast", "f", "--json"]).output)
-    assert data["mode"] == "stable" and data["sims"] >= 8
+    assert data["mode"] == "stable" and data["draws"] == 64
     assert json.loads(runner.invoke(app, ["--db", db, "next", "f", "--json", "--no-forecast"])
                       .output)["rounds_left"] is None  # fmt: skip
     rk_conn = store.connect(tmp_path / "f.db")
@@ -262,7 +240,12 @@ def test_next_and_forecast_commands_show_rounds_left(tmp_path):
 
 
 @pytest.mark.perf
-def test_forecast_stays_within_its_time_budget():
-    theta, cov = np.zeros(200), np.eye(200) * 2.25
-    f = forecast_rounds("exact", theta, cov, list(range(200)), {}, 1)
-    assert f.ms < 1000 * 2 + 200  # the budget, plus the cut-off for a running simulation
+@pytest.mark.parametrize(
+    ("mode", "k", "limit_ms"), [("stable", 20, 30), ("stable", 50, 80), ("exact", 200, 2000)]
+)
+def test_the_forecast_takes_milliseconds(mode, k, limit_ms):
+    rng = np.random.default_rng(1)
+    theta, cov = rng.normal(0, 1.5, k), np.eye(k) * 0.5
+    forecast_rounds(mode, theta, cov, list(range(k)), {}, 1)  # the floor table, once
+    f = forecast_rounds(mode, theta, cov, list(range(k)), {}, 1)
+    assert f.ms < limit_ms

@@ -11,16 +11,16 @@ This document covers how rankify works and why it is built this way. The rules b
                         │                         v
                      planner <──scores, ranges── fit
                         │
-                        └──> forecast, in background ──> rounds left
+                        └──> forecast ──> rounds left
 ```
 
-You answer a round, and the answer is added to the log. The model is refitted to every answer in the log, which gives each item a score and a range. The planner uses those to choose the next round. In the background, the forecast estimates how many rounds are left. Everything except the log can be rebuilt from the log.
+You answer a round, and the answer is added to the log. The model is refitted to every answer in the log, which gives each item a score and a range. The planner uses those to choose the next round, and the forecast estimates how many rounds are left. Everything except the log can be rebuilt from the log.
 
 ## Words
 
 - **Score**: an item's strength on the Elo scale. 1500 is average. 100 points apart means the higher item wins about 64% of the time.
 - **Confidence**: the chance that an item really belongs above the next one.
-- **Could be**: where the item might really rank, as a 90% range.
+- **Could be**: where the item might really rank: the narrowest run of ranks that holds 90% of the model's draws, and always the rank shown.
 - **Round**: one question. A round is a *pair* ("which is better?"), a *pick* ("which is best of these?") or a *rank* ("put these in order").
 - **Mode**: how sure you need to be: Quick, Stable or Exact.
 
@@ -66,6 +66,10 @@ The best candidate wins, and its display order is shuffled with the round's seed
 
 **Stopping.** The session stops when the mode's target is reached. It also stops when nothing is worth asking: even 8 more answers to the most useful pair would teach less than 0.1 bits about the order that matters. The test looks at several answers, not one, on purpose. A judge who gets a pair right 60% of the time teaches only about 0.03 bits per answer (1 − h(0.6)), but those bits add up. A one-answer test stopped far too early on crowded lists. The 0.1-bit threshold was tuned on hidden lists the benchmark never uses (EXPERIMENT.md).
 
+**Another look before giving up.** Before that floor may end a session, every item still in play gets at least 6 answers: the least-seen first, against the partner whose answer is worth most per second. Each pair's worth is weighted by the chance it matters for the mode, and on a long list that chance spreads thin. On 50-item Quick lists about 20 barely seen items each had a 5–10% chance of being #3, so no single pair looked worth asking, and the floor stopped with the top 3 wrong in half the lists. Two blunter fixes were tried first. A floor that ignored the weighting kept sessions with the human judge going to the round budget, because near-ties stay uncertain forever; more first looks for every item on long lists barely helped.
+
+**Could be and stopping use different ranges.** Could be shows the narrowest run of ranks holding 90% of the draws. The central 5th–95th percentile range used before rounded outward, since ranks are whole numbers, and held the true rank 95–100% of the time in the benchmark. The stopping rules, which ask whether an item below the settled part could still reach into it, keep that wider central range as a margin: with the narrower one, Stable stopped sooner with the human judge and got fewer pairs right.
+
 Calibration lists (`--calibrate`) keep random pairs with swapped repeats. That is the design the calibration's bias correction simulates.
 
 Multi-item rounds help only in some situations. Saha & Gopalan (2019) show that with noisy answers, "pick the best of k" is no faster than pairs, while ordering the top m items is about m times faster. So picks pay off mainly when one item clearly stands out, and orderings pay off when a few items are close. The planner doesn't need these as hard-coded rules. They fall out of the gain-per-second scoring. Whether the scoring gets them right is a question for the benchmark (goal G3).
@@ -82,27 +86,46 @@ In every mode, a confident tie (at least 90% likely to be within 30 Score points
 
 ## Rounds left
 
-To estimate rounds left, rankify plays the rest of the session forward many times in simulation. Each time, it draws plausible "true" scores from the current fit, simulates your answers the way the model expects them, and runs a cheap version of the planner until it would stop. The spread of the round counts gives a range like "about 14 (10–19)": the median, and the 10th to 90th percentile.
+rankify estimates the rounds left with a formula. Each pair the mode still needs gets a sample size, the way a trial is sized for the difference it must detect, and the sizes add up. A forecast takes a few milliseconds and gives the same answer every time, so it can follow every answer even when many people use rankify at once. An earlier version played the rest of the session forward in simulation. It took up to a second per forecast, and on the same saved sessions the formula is as accurate or more (see "How well it does" below).
 
-The cheap planner keeps the real one's rules: first looks, pairs weighted by how much they matter for the mode, the mode's target, and the 8-answer floor. On a list with mixed rounds it also grows picks and orderings with the real planner's own code, and weighs them against pairs by information per second, using your times so far. The real planner grows sets from the two best pairs; the forecast grows them from the best one, which halves the time and changed the forecasts very little.
+**Which pairs.** A session stops when the mode's target holds or nothing is left worth asking (see Stopping). Both come down to single gaps between two items. The top neighbours must be confidently ordered or confidently tied, and no item below the settled part may still reach into it. Which pairs those are depends on the true scores, which are unknown. So the forecast takes 64 draws of them from the fit, with a fixed seed, and reads the pairs off each draw's true order.
 
-The simulated judge answers the way the model expects: Bradley–Terry for pairs, and Plackett–Luce for picks and orderings, drawn by adding Gumbel noise to each score and sorting (Yellott 1977). Three things come on top:
+The fit learns how widely scores spread from your answers (the prior width), and early on it is unsure of it. On the benchmark's lists it dips from 1.5 to about 1.0 after ten answers and climbs back to 1.3–1.75 later. So each draw also draws a width from what is known about it, and redoes the fit's Gaussian for that width with the same answers. Before any answers the width is only known to its hyperprior. Each item the answers pin down narrows it further, the way MacKay (1992) counts well-determined parameters.
+
+**How many answers a pair needs.** The fit is a Laplace approximation (Tierney & Kadane 1986). Take a pair whose gap the fit now puts at m0 with variance v0. After n more answers at the judge's true rates, the fit's estimate m of the gap solves
+
+    (m − m0) / v0 = n (drive − G(m))
+
+and the gap's precision becomes 1/v0 + n H(m). G is the score the model expects at a gap m (half the chance of winning minus that of losing, under Davidson's model with "can't decide"), H is its slope, and drive is the score the judge actually gives at the true gap. Read the other way round, n is a closed form of m. So walking m from today's estimate toward the true gap traces the whole path, with no simulation. The pair is done at the first point where one of these holds:
+
+- Confidence reaches the mode's level.
+- It is a confident tie, where a tie counts.
+- 8 more answers would teach it less than 0.1 bits, weighted by how much the pair matters (the floor). The floor's bits come from a table of 121 by 56 points, computed once, which agrees with the exact sum on all but about 1 in 1000 points.
+
+Two simpler versions were tried and failed. The information at the true gap says a clear judge's answers teach almost nothing, because they are predictable, so it asked for hundreds of answers. In fact each answer still moves an unsure fit a lot, and the path above settles such a pair in about five. Counting each pair on its own ran two to three times long, because answers about one item help every pair it is in.
+
+**Sharing.** The answers of the pairs that settle the top are added to the fit's covariance in one low-rank update (Woodbury 1950), and the items below are counted against the result.
+
+**Items below the settled part.** The stopping rule asks whether an item's Could be range reaches into the settled part: whether it could beat whatever item ends up last there, not one particular item. So each item below is compared with a line: the true score of the last item in the settled part. The line's value and spread come from the draws, and its spread shrinks to the edge item's own as the top settles. Against that crowd an item is out sooner than against any one item; on 50-item lists, most items are out after their first looks. For the floor, these pairs matter about as much as the edge item belongs to the settled part, which is the edge pair's Confidence when it is done. Real sessions with the benchmark's human judge end at the floor with these pairs at a weight of 0.4 to 0.7, and the forecast does the same.
+
+**From answers to rounds.** A pair round is one answer. A pick or ordering of 3 to 5 items is worth about 2.5 pair answers, a number fitted on the benchmark's mixed sessions. First looks still owed are answers too. Your habits enter through the rates of your answers:
 
 - **Can't decide:** at the rate the fit has learned for this list, from Davidson's tie weight.
-- **Fatigue:** answers get noisier as a sitting goes on, by the benchmark's guess (0.3% per call, at most 1.6 times), relative to how tired you were, on average, in the answers the fit has seen. A pause of more than 30 minutes starts a new sitting, and the simulation goes on from where the current one is. One short list can't measure this, so it stays a guess until the pilot does.
+- **Fatigue:** answers get noisier as a sitting goes on, by the benchmark's guess (0.3% per call, at most 1.6 times), relative to how tired you were, on average, in the answers the fit has seen. The forecast averages it over the calls still to come. A pause of more than 30 minutes starts a new sitting. One short list can't measure this, so it stays a guess until the pilot does.
 - **Sharpness:** how much more decisive you are than the model expects. Before each answer rankify had an expectation for it, saved with the fit it asked from. A calibration slope of your last 200 answers against those expectations (Cox 1958), allowing for how unsure each expectation was, comes out near 1 for a judge the model describes well and higher for one who never contradicts themself. It is held near 1 until the answers clearly say otherwise.
 
-Occasional random answers (lapses) were tried and left out. The fit already narrows its scores to explain the upsets it has seen, so simulating lapses on top counted them twice, and the forecasts ran long.
+**The range.** The draws cover what the true scores might be, but not how your answers happen to fall. So each draw's count is taken as a lognormal with a log standard deviation of 0.3, fitted on the benchmark's sessions, and the range is the 10th to 90th percentile of that mixture. A draw that needs 50 rounds per item or more counts as "at least that many". When that leaves the median unknown, the answer is "at least N rounds".
 
-The fit learns how widely scores spread from your answers (the prior width), and early on it is unsure of it. On the benchmark's lists it dips from 1.5 to about 1.0 after ten answers and climbs back to 1.3–1.75 later. So each simulation first draws a width from what is known about it, and redoes the fit for that width with the same answers. Before any answers the width is only known to its hyperprior. Each item the answers pin down narrows it further, the way MacKay (1992) counts well-determined parameters. Without this the ranges held the real rounds left too rarely. The simulated fit then learns its width again from the simulated answers every 4 answers, with the real fit's EM step, so it moves as the real fit's does. Before that, a simulation that drew a very narrow width kept it as if it were known and stopped right after first looks, which gave fresh lists ranges like "72 (12–99)".
+**How well it does.** On 1,096 checkpoints saved from benchmark sessions (rounds 0, 10, 25, 50 and 100), the 10–90% range held the rounds really left in 74–100% of each setting for the human and normal judges, with the median off by 14–40%. The simulation it replaced held 80% (Quick) and 86% (Stable) for the human judge on 20 items, and 42% for 50-item Quick lists. A forecast takes 8 ms at the median and 21 ms at the 95th percentile. Goal G7 in the benchmark measures it end to end (see ROADMAP.md).
 
-Refitting after every simulated answer would be far too slow. Instead each answer updates the fit's Gaussian in closed form. A pair answer takes the moment-matching step TrueSkill uses for a game (Herbrich, Minka & Graepel 2007). The logistic curve is matched by a probit curve with scale 1.702, and for a probit answer the step gives the exact posterior mean. A pick, an ordering or "can't decide" finds the posterior mode of the items shown with a few damped Newton steps, and takes their covariance from the answer's Fisher information there: a Laplace update, as in the real fit. The other items follow through their covariance with the items shown. From the prior this is exactly the full refit of the same answer. A single Newton step from the current mean was tried first; it overshot when an answer surprised a fit that was still unsure, and a "can't decide" could even swap the two items. Could be and each pair's weight come from 96 posterior draws, refreshed every 4 simulated answers. A first version estimated ranks with a normal approximation that treated "j is above i" as independent for every j. That made ranks far too certain early on, and the forecast said "0 rounds left" right after first looks.
+Known misses:
 
-A forecast takes up to about a second. Within its 0.8 s budget it runs about 10 to 60 simulations on a list of pairs (fewer on longer sessions), and about 6 to 25 on a mixed list, where each simulated round grows sets. A simulation stops at 50 rounds per item; Exact on 20 items with the benchmark's human judge took about 25 per item. On a large list a simulation can run out of time; it then counts only as "at least this many", and if that leaves the median unknown, the answer is "at least N rounds". In the terminal UI the forecast runs a few simulated rounds at a time between keypresses, and the header shows the previous estimate, marked "updating", until the new one is ready. A forecast is saved, keyed by the answer log, the items and the mode, and reused until one of them changes.
+- **A judge who never errs:** forecasts run 1.5 to 2.5 times long. Sharpness is learned slowly (about 1.0 after 10 answers and 1.7 after 50), so early on the forecast takes such a judge for an ordinary one. The simulation had the same problem.
+- **Late in Stable sessions** forecasts run 30–35% short, because the planner's "another look" rounds before giving up (see Stopping) are not counted.
+- **Clear judges on 20-item Quick lists** run about 30% long, mostly early, while the fit's width and your sharpness are still low.
+- **Your answer times:** the forecast counts answers, and mixed lists turn them into rounds with a fixed rate. A mixed session measures how long you take for each kind of round, and as those times replace the guesses, the planner's mix shifts.
 
-What the forecast can't see coming: your answer times. A mixed session measures how long you take for each kind and size of round, and as those times replace the guesses, the real planner's mix shifts. On the benchmark's judge, orderings turn out cheaper than guessed, so real sessions ask fewer pairs than the simulation does (8–16% against about 25–40%) and finish sooner. Given the times each session ended up measuring, 20-item mixed forecasts ran 3% long on Quick instead of 16%. Predicting set times from the first few timed answers did not help, because much of the shift comes from your pair time, which a mixed session measures last. Goal G7 measures how much all this matters (see ROADMAP.md).
-
-A judge who never errs is the other known miss. Its forecasts run two to three times long, and even when told the judge is nearly perfect (a sharpness of 8), they still ran 33–97% long: with no contradictions, the real fit spreads the scores faster than the simulated fit does.
+A forecast is saved, keyed by the answer log, the items and the mode, and reused until one of them changes. In the terminal UI it is worked out right after each round is drawn.
 
 ## Storage
 
@@ -146,15 +169,15 @@ An agent can also query the SQLite file directly.
 
 ## Speed
 
-From answer to next round should take under 50 ms for lists of up to 200 items. That breaks down into about 5 ms to save, 10 ms to refit and 30 ms to plan. The forecast gets up to a second, in the background. Performance tests enforce these targets.
+From answer to next round should take under 50 ms for lists of up to 200 items. That breaks down into about 5 ms to save, 10 ms to refit and 30 ms to plan. The rounds-left forecast takes a few milliseconds more. Performance tests enforce these targets.
 
 Measured on 2026-10-12 (Phase 4), for 200 items, on a list with mixed rounds (the slower kind):
 
 - Saving an answer takes 0.02 ms, and a warm refit with a fixed width 3.5 ms.
 - Answer to next round takes 31 ms at the median and 38 ms at the 95th percentile. Asking the next round reuses the fit the answer just made, instead of fitting twice.
-- The forecast stays within its budget of about a second.
+- The forecast stayed within its budget of about a second. (Since replaced by a formula: 8 ms at the median, 21 ms at the 95th percentile, on the benchmark's saved sessions.)
 - In the terminal UI on 20 items, the next round is drawn 3.5 ms after the answer key, and a key reaches the UI within 1 ms while a forecast runs.
-- On a 20-item mixed list (measured after the forecast follow-ups), the next round is drawn 25 ms after the answer key (p95 31 ms), most of it planning sets, and a key still reaches the UI within 1 ms. A forecast on a mixed list pauses after every simulated round. Headless tests that time a key to the next round read about 0.9 s, but that is Textual's test pilot waiting up to a second for the process to go idle.
+- On a 20-item mixed list (measured after the forecast follow-ups), the next round is drawn 25 ms after the answer key (p95 31 ms), most of it planning sets, and a key still reaches the UI within 1 ms. (Then, a forecast on a mixed list was a simulation that paused after every simulated round.) Headless tests that time a key to the next round read about 0.9 s, but that is Textual's test pilot waiting up to a second for the process to go idle.
 - The expected information of an ordering is summed stage by stage, with each stage's choice probabilities laid out by item: the same numbers to 1e-15 as a dense sum over every order, and 2.3–2.8 times faster.
 
 ## How the design applies the principles
@@ -166,7 +189,7 @@ The numbers refer to [PHILOSOPHY.md](PHILOSOPHY.md).
 3. **Reproducible.** An append-only `rounds` table, one batch fit over all answers, a seed on every round, rebuildable caches, and `rankify verify`.
 4. **Honest certainty.** Ranges on every score, Could be intervals, interval forecasts, and calibration tested in the benchmark.
 5. **Proven before novel.** Bradley–Terry / Plackett–Luce at the core. New methods only in the planner, gated by the benchmark in [EXPERIMENT.md](EXPERIMENT.md).
-6. **Keep up.** A 50 ms budget from answer to next round, warm-started fits, and the forecast in the background.
+6. **Keep up.** A 50 ms budget from answer to next round, warm-started fits, and a rounds-left forecast that is a formula, not a simulation.
 
 ## References
 
