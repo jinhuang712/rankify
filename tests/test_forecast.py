@@ -20,7 +20,7 @@ from rankify.engine.forecast import (
     score,
 )
 from rankify.engine.planner import ALL_KINDS, order_information_over
-from rankify.service import _sharpness, _sittings
+from rankify.service import _sharpness, _sharpness_belief, _sittings
 
 from .conftest import SimulatedJudge, run_rounds
 
@@ -164,6 +164,29 @@ def test_sharpness_is_about_1_for_a_judge_the_model_describes_and_more_for_a_per
         before = {i: (float(scores[i]), 0.0) for i in range(4)}
         rankings.append(("rank", [0, 1, 2, 3], [int(i) for i in order], before))
     assert 0.85 < _sharpness(rankings) < 1.15
+
+
+def test_sharpness_is_unsure_until_answers_say_much():
+    rng = np.random.default_rng(6)
+    answers = []
+    for _ in range(300):
+        mu, sd = rng.normal(0, 1.5), 0.3
+        truth = rng.normal(mu, np.sqrt(2) * sd)
+        won = 1 if rng.random() < 1 / (1 + np.exp(-truth)) else 2
+        answers.append(("pair", [1, 2], [won], {1: (mu, sd), 2: (0.0, sd)}))
+    assert _sharpness_belief([]) == (1.0, 0.5)
+    few, many = _sharpness_belief(answers[:10])[1], _sharpness_belief(answers)[1]
+    assert many < few <= 0.5 and many < 0.15
+
+
+def test_an_unsure_sharpness_widens_the_range():
+    theta, cov = np.linspace(2, -2, 10), np.eye(10) * 0.8
+    looks = dict.fromkeys(range(10), 2)
+    sure = forecast_rounds("stable", theta, cov, list(range(10)), looks, 1, habits=Habits())
+    unsure = forecast_rounds(
+        "stable", theta, cov, list(range(10)), looks, 1, habits=Habits(sharpness_sd=0.5)
+    )
+    assert unsure.high - unsure.low > sure.high - sure.low
 
 
 def test_fatigue_resets_between_sittings():

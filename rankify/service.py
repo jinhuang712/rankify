@@ -2,6 +2,7 @@
 
 import itertools
 import json
+import math
 import re
 import secrets
 from collections import Counter
@@ -590,6 +591,9 @@ class Rankify:
             store.timing_samples(self.conn, lst.id, judge),
             store.set_timing_samples(self.conn, lst.id, judge),
         )
+        sharpness, sharpness_sd = _sharpness_belief(
+            store.answers_with_prior_fit(self.conn, lst.id, judge, SHARPNESS_ANSWERS)
+        )
         return {
             "mode": mode or lst.settings["mode"],
             "theta": r.theta,
@@ -601,9 +605,8 @@ class Rankify:
             "kinds": PAIRS_ONLY if _pairs_only(lst) else ALL_KINDS,
             "habits": Habits(
                 tie=float(np.exp(r.x[-1])),  # the fit's Davidson weight
-                sharpness=_sharpness(
-                    store.answers_with_prior_fit(self.conn, lst.id, judge, SHARPNESS_ANSWERS)
-                ),
+                sharpness=sharpness,
+                sharpness_sd=sharpness_sd,
             ),
             **_sittings(store.effective_rounds(self.conn, lst.id), judge),
             "sigma": r.params.get("sigma"),
@@ -1131,6 +1134,11 @@ _SHARPNESS_GRID = np.exp(np.linspace(np.log(0.25), np.log(8.0), 57))
 
 
 def _sharpness(answers) -> float:
+    """The most likely sharpness; see ``_sharpness_belief``."""
+    return _sharpness_belief(answers)[0]
+
+
+def _sharpness_belief(answers) -> tuple[float, float]:
     """How much more decisive the judge is than the model expects: a calibration slope (Cox
     1958), from what rankify expected just before each answer. A judge the model describes
     well comes out near 1; one who never contradicts themself, far above it.
@@ -1141,7 +1149,9 @@ def _sharpness(answers) -> float:
     a pick as the chosen item against each other one. Sets are weighted to count as as
     many choices as they hold. With a sharpness k, the chance that w beats l, given that rankify thought
     their gap was mu with variance v, is about sigmoid(k mu / sqrt(1 + pi k² v / 8))
-    (MacKay 1992), so an unsure expectation says little either way."""
+    (MacKay 1992), so an unsure expectation says little either way. Returns the most
+    likely sharpness and the sd of its log under the posterior, which is wide until the
+    answers say much (the prior alone gives 0.5)."""
     mu, var, weight = [], [], []
     for kind, shown, answer, before in answers:
         if kind == "pair":
@@ -1159,13 +1169,18 @@ def _sharpness(answers) -> float:
             var.append(before[a][1] ** 2 + before[b][1] ** 2)
             weight.append(w)
     if not mu:
-        return 1.0
+        return 1.0, SHARPNESS_SD
     m, v, w = (np.array(x)[None, :] for x in (mu, var, weight))
     k = _SHARPNESS_GRID[:, None]
     z = k * m / np.sqrt(1.0 + np.pi * k**2 * v / 8.0)
     loglik = -(w * np.logaddexp(0.0, -z)).sum(axis=1)
-    prior = -0.5 * (np.log(_SHARPNESS_GRID) / SHARPNESS_SD) ** 2
-    return float(_SHARPNESS_GRID[np.argmax(loglik + prior)])
+    log_k = np.log(_SHARPNESS_GRID)
+    post = loglik - 0.5 * (log_k / SHARPNESS_SD) ** 2
+    p = np.exp(post - post.max())
+    p /= p.sum()
+    mean = float(p @ log_k)
+    sd = math.sqrt(max(float(p @ (log_k - mean) ** 2), 0.0))
+    return float(_SHARPNESS_GRID[np.argmax(post)]), sd
 
 
 def _sittings(rounds: list[store.RoundRow], judge: int, at: datetime | None = None) -> dict:

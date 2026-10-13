@@ -96,7 +96,8 @@ class Habits:
     fatigue: float = HumanParams.fatigue  # noise grows by this share per call made...
     fatigue_cap: float = HumanParams.fatigue_cap  # ...up to this multiple
     tie: float = math.exp(Prior.tie_mean)  # Davidson's nu: "can't decide" between equals
-    sharpness: float = 1.0  # how much more decisive than the model expects
+    sharpness: float = 1.0  # how much more decisive than the model expects...
+    sharpness_sd: float = 0.0  # ...and how unsure that still is (sd of its log)
 
     def noise(self, effort: int) -> float:
         """The judge's noise after ``effort`` calls, as a multiple of a fresh judge's."""
@@ -461,10 +462,15 @@ def forecast_rounds(
     # sittings, assume one sitting so far.
     past = habits.past_noise(range(effort) if past_efforts is None else past_efforts)
     per_round = 1.0 if tuple(kinds) == PAIRS_ONLY else PAIRS_PER_SET_ROUND
+    # Each draw takes its own sharpness from what the answers say about it so far.
+    z = np.array([NormalDist().inv_cdf((q + 0.5) / draws) for q in range(draws)])
+    sharp = habits.sharpness * np.exp(
+        habits.sharpness_sd * np.random.default_rng([seed, 31]).permutation(z)
+    )
     noise = np.full(draws, habits.noise(effort))
     n = np.zeros(a.shape)
     for _ in range(2):  # fatigue: the noise averaged over the calls still to come
-        scale = (habits.sharpness * past / noise)[:, None]
+        scale = (sharp * past / noise)[:, None]
         n = _answers(S, tr.mean, tr.truth, line, a, b, needs, scale, habits.tie)
         calls = np.minimum(n.sum(axis=1), cap * per_round)
         noise = habits.noise_over(float(effort), calls)
