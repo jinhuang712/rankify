@@ -231,6 +231,11 @@ class Plan:
 
 
 MIN_LOOKS = 2  # answers about an item before the planner may judge it unimportant
+# How the planner scores pairs. "time" is rankify: order information per second. The
+# others exist only to check that choice in the benchmark: "per-round" ignores time,
+# and "closest" asks the relevant pair closest to 50/50 (uncertainty sampling) in place
+# of order information. Stopping is the same for all three.
+VARIANTS = ("time", "per-round", "closest")
 PAIRS_ONLY = ("pair",)
 ALL_KINDS = ("pair", "pick", "rank")
 
@@ -258,6 +263,7 @@ def plan_round(
     looks: dict[int, int] | None = None,
     kinds: tuple[str, ...] = ALL_KINDS,
     avoid: frozenset = frozenset(),
+    variant: str = "time",
 ) -> Plan:
     """The next round for ``mode``. ``ranks`` holds (position, rank_lo, rank_hi) for the
     active items, best first. ``looks`` counts the answers that involved each item.
@@ -298,6 +304,10 @@ def plan_round(
     margin = closeness(mu, var)
     seconds = timing.seconds(margin)
     value = gain / seconds
+    if variant == "per-round":
+        value = gain
+    elif variant == "closest":  # 1 for a coin flip, falling as the answer gets predictable
+        value = relevance * 2.0 * (1.0 - _phi(margin))
     ranked = np.argsort(-value, kind="stable")
     best = ranked[:5]
     rng = np.random.default_rng(seed)

@@ -35,12 +35,42 @@ import numpy as np
 from rankify.engine.judge import HumanParams, human_answer, human_set_answer
 
 RATING_SYSTEMS = ("elo", "elo-close", "glicko2", "trueskill", "openskill", "arena")
-REFERENCE = ("just-sort-it", "insertion-sort")
-# rankify runs once per mode: as shipped (pairs), and with `new --rounds mixed` (goal G3).
-MODED = ("rankify", "rankify-mixed")
+REFERENCE = ("just-sort-it", "insertion-sort", "ford-johnson")
+# rankify runs once per mode: as shipped (pairs), with `new --rounds mixed` (goal G3), and as
+# two planner variants that check its design: the pair closest to 50/50 in place of order
+# information, and information per round in place of per second. (rounds, planner) for each.
+VARIANTS = {
+    "rankify-mixed": ("mixed", "time"),
+    "rankify-closest": ("pairs", "closest"),
+    "rankify-per-round": ("pairs", "per-round"),
+}
+ABLATIONS = ("rankify-closest", "rankify-per-round")
+MODED = ("rankify", *VARIANTS)
 REPLAYED_RANKIFY = tuple(f"{m}:exact" for m in MODED)
 DEFAULT_METHODS = ("rankify", "rankify-mixed", *RATING_SYSTEMS, *REFERENCE)
-JUDGES = ("human", "perfect", "noisy")
+# human is the headline; perfect a sanity check; noisy the model rankify assumes, at the human
+# judge's accuracy. The rest each break or stretch one assumption (EXPERIMENT.md, Part 1).
+JUDGES = (
+    "human",
+    "perfect",
+    "noisy",
+    "sharp",
+    "normal",
+    "fuzzy",
+    "careless",
+    "biased",
+    "thurstone",
+    "similar",
+    "tired",
+)
+# Bradley-Terry slopes that tell neighbours on a 20-item list apart 90%, 75% and 60% of the
+# time (median over lists of the benchmark's shape).
+MODEL_SLOPE = {"sharp": 9.02, "normal": 4.51, "fuzzy": 1.665}
+THURSTONE_SLOPE = 2.77  # normal-curve noise, as accurate as normal
+CARELESS_LAPSE = 0.05  # careless: this share of answers at random
+FIRST_LEAN = math.log(0.6 / 0.4)  # biased: of two equal items, the first shown wins 60%
+TIRED_GROWTH = 0.01  # tired: noise grows 1% per round
+SIMILAR_SHARE = 0.25  # similar: this share of items get a near-identical twin
 DEFAULT_JUDGES = ("human", "perfect")
 TARGETS = ("quick", "stable", "exact")
 CONFIRM = 10  # a target counts as reached once it has held for this many more rounds
@@ -68,8 +98,14 @@ class Judge:
         kind: str,
         rng: np.random.Generator,
         params: HumanParams = HUMAN,
+        twins: dict[str, int] | None = None,
     ):
         self.theta, self.kind, self.rng, self.p = theta, kind, rng, params
+        self.twins = twins or {}  # similar: item -> twin group
+
+    def _slope(self, round_no: int) -> float:
+        k = MODEL_SLOPE.get(self.kind, MODEL_SLOPE["normal"])
+        return k / (1.0 + TIRED_GROWTH * round_no) if self.kind == "tired" else k
 
     def answer(self, shown: list[str], round_no: int) -> tuple[int | None, float]:
         """(1 or 2 for the better item, or None for "can't decide"; seconds taken)."""
@@ -83,8 +119,16 @@ class Judge:
         )
         if self.kind == "perfect":
             return (1 if diff > 0 else 2), seconds
-        # noisy: Bradley-Terry, the model rankify itself assumes
-        p_first = 1.0 / (1.0 + math.exp(-1.702 * diff / (math.sqrt(2.0) * p.noise)))
+        if self.kind == "noisy":  # Bradley-Terry, the model rankify itself assumes
+            p_first = 1.0 / (1.0 + math.exp(-1.702 * diff / (math.sqrt(2.0) * p.noise)))
+            return (1 if rng.random() < p_first else 2), seconds
+        if self.kind == "careless" and rng.random() < CARELESS_LAPSE:
+            return int(rng.integers(1, 3)), seconds
+        if self.kind == "thurstone":
+            p_first = _PHI.cdf(THURSTONE_SLOPE * diff)
+        else:
+            lean = FIRST_LEAN if self.kind == "biased" else 0.0
+            p_first = 1.0 / (1.0 + math.exp(-(self._slope(round_no) * diff + lean)))
         return (1 if rng.random() < p_first else 2), seconds
 
     def answer_set(self, shown: list[str], kind: str, round_no: int) -> tuple[list[int], float]:
@@ -96,10 +140,41 @@ class Judge:
             return human_set_answer(p, rng, scores, kind, round_no)
         _, seconds = human_set_answer(replace(p, lapse=0.0), rng, scores, kind, 0)
         s = np.array(scores)
+        k = len(s)
         if self.kind == "noisy":  # Plackett-Luce with the Bradley-Terry scale of the pairs
-            s = 1.702 * s / (math.sqrt(2.0) * p.noise) + rng.gumbel(size=len(s))
+            s = 1.702 * s / (math.sqrt(2.0) * p.noise) + rng.gumbel(size=k)
+        elif self.kind == "careless" and rng.random() < CARELESS_LAPSE:
+            s = rng.permutation(k).astype(float)
+        elif self.kind == "thurstone":  # each score perceived once with normal noise
+            s = s + rng.normal(0.0, 1.0 / (THURSTONE_SLOPE * math.sqrt(2.0)), size=k)
+        elif self.kind == "similar":
+            order = self._twin_choices(shown, self._slope(round_no) * s)
+            numbers = [x + 1 for x in order]
+            return (numbers if kind == "rank" else numbers[:1]), seconds
+        elif self.kind != "perfect":  # Plackett-Luce: utilities plus Gumbel noise, sorted
+            s = self._slope(round_no) * s + rng.gumbel(size=k)
+            if self.kind == "biased":
+                s[0] += FIRST_LEAN
         numbers = [int(x) + 1 for x in np.argsort(-s, kind="stable")]
         return (numbers if kind == "rank" else numbers[:1]), seconds
+
+    def _twin_choices(self, shown: list[str], u: np.ndarray) -> list[int]:
+        """Best of the rest, again and again, where twins shown together count as one option
+        and split its chance: the similarity effect that breaks Luce's choice axiom
+        (Debreu 1960). Returns positions in ``shown``, best first."""
+        rest, order = list(range(len(shown))), []
+        while rest:
+            groups: dict[object, list[int]] = {}
+            for i in rest:
+                groups.setdefault(self.twins.get(shown[i], ("alone", i)), []).append(i)
+            members = list(groups.values())
+            w = np.array([np.mean(u[g]) for g in members])
+            q = np.exp(w - w.max())
+            g = members[int(self.rng.choice(len(members), p=q / q.sum()))]
+            chosen = int(self.rng.choice(g))
+            order.append(chosen)
+            rest.remove(chosen)
+        return order
 
 
 def hidden_scores(
@@ -119,6 +194,20 @@ def list_difficulty(
         acc += [_PHI.cdf(g / (math.sqrt(2.0) * params.noise)) for g in gaps]
         near += list(gaps < TIE_MARGIN)
     return float(np.median(acc)), float(np.mean(near))
+
+
+def add_twins(theta: dict[str, float], rng: np.random.Generator) -> dict[str, int]:
+    """For the similar judge: give a share of the items a near-identical twin, in place.
+    Returns item -> twin group. Twins are near-ties, so no target counts their order."""
+    names = list(theta)
+    pairs = int(SIMILAR_SHARE * len(names) / 2 + 0.5)  # round half up
+    picked = [names[k] for k in rng.permutation(len(names))[: 2 * pairs]]
+    twins = {}
+    for g in range(pairs):
+        a, b = picked[2 * g], picked[2 * g + 1]
+        theta[b] = theta[a] + 0.01 * float(rng.standard_normal())
+        twins[a] = twins[b] = g
+    return twins
 
 
 def load_profile(path: Path) -> dict:
@@ -264,14 +353,15 @@ def run_one(
     ``rankify-mixed`` is rankify with pick and rank rounds as well as pairs."""
     params, spread = _unpack(profile)
     base_method, _, mode = method.partition(":")
-    rounds_kind = "mixed" if base_method == "rankify-mixed" else "pairs"
-    base_method = "rankify" if base_method == "rankify-mixed" else base_method
+    rounds_kind, planner = VARIANTS.get(base_method, ("pairs", "time"))
+    base_method = "rankify" if base_method in VARIANTS else base_method
     rng = np.random.default_rng(seed)
     names = [f"item-{k:02d}" for k in range(n)]
     theta = hidden_scores(names, rng, spread)
+    twins = add_twins(theta, np.random.default_rng([seed, 3])) if judge_kind == "similar" else {}
     true_rank = {x: r + 1 for r, x in enumerate(sorted(names, key=lambda x: -theta[x]))}
     index = {name: k for k, name in enumerate(names)}
-    judge = Judge(theta, judge_kind, np.random.default_rng([seed, 1]), params)
+    judge = Judge(theta, judge_kind, np.random.default_rng([seed, 1]), params, twins)
     res = RunResult(method, judge_kind, n, seed)
     known = np.zeros((n, n), dtype=bool)  # known[w, l]: earlier answers imply w beats l
     seen: set[frozenset] = set()
@@ -306,11 +396,12 @@ def run_one(
             str(seed),
             "--rounds",
             rounds_kind,
+            *(["--planner", planner] if planner != "time" else []),
         )
         ranking = None
         effort = 0  # fatigue grows per call made: a ranking of k counts as k - 1 pairs
         for _ in range(budget):
-            if base_method == "rankify" and res.rounds in FORECAST_AT:
+            if base_method == "rankify" and planner == "time" and res.rounds in FORECAST_AT:
                 f = json.loads(cli.ok("forecast", "bench", "--json"))
                 res.forecasts.append([res.rounds, f["median"], f["low"], f["high"], f["at_least"]])
             code, out = cli.call("next", "bench", "--json", "--no-forecast")
@@ -578,14 +669,18 @@ FEATURES = {
     "Chooses informative pairs": {
         "rankify": "yes: order information per second, weighted by the mode",
         "elo-close": "yes: close ratings",
+        "rankify-closest": "yes: the relevant pair closest to 50/50",
+        "rankify-per-round": "yes: order information per round",
         "just-sort-it": "yes: quicksort",
         "insertion-sort": "yes: binary search",
+        "ford-johnson": "yes: merge insertion",
     },
     "Knows when it is done": {
         "rankify": "yes: confidence target, or nothing worth asking",
         "insertion-sort": "yes, but trusts every answer",
+        "ford-johnson": "yes, but trusts every answer",
     },
-    "Rounds left": {"rankify": "no (Phase 4)"},
+    "Rounds left": {"rankify": "yes: simulated, with a 10–90% range"},
     "Precision modes": {"rankify": "yes: quick, stable, exact"},
     "Pick / rank rounds": {
         "rankify-mixed": "yes: picks and rankings of 3 to 5, when they teach more per second",
@@ -598,12 +693,14 @@ FEATURES = {
         "openskill": "yes (from sigma)",
         "arena": "yes (our fit)",
         "just-sort-it": "yes (our fit)",
+        "ford-johnson": "while sorting (our fit)",
     },
     "Same answers, any order, same ranking": {
         "rankify": "yes",
         "arena": "yes",
         "just-sort-it": "yes",
         "insertion-sort": "n/a",
+        "ford-johnson": "yes",
     },
 }
 _FEATURE_DEFAULT = {"Chooses informative pairs": "no: random pairs"}
@@ -657,10 +754,14 @@ def _report(
         "",
         (
             "**Methods.** rankify as shipped (pairs); rankify-mixed (the same with `new --rounds "
-            "mixed`, which also asks picks and rankings of 3 to 5 items); rating systems built for human judges (Elo, Elo with close "
-            "pairs, Glicko-2, TrueSkill, openskill, and Chatbot-Arena-style Bradley-Terry); and two "
-            "sorts as reference lines only. The sorts assume a consistent judge, which people are "
-            "not."
+            "mixed`, which also asks picks and rankings of 3 to 5 items); when run, two planner "
+            "variants that check rankify's design (rankify-closest asks the relevant pair closest "
+            "to 50/50, rankify-per-round counts information per round, not per second; both stop "
+            "by rankify's rules); rating systems built for human judges (Elo, Elo with close "
+            "pairs, Glicko-2, TrueSkill, openskill, and Chatbot-Arena-style Bradley-Terry); and "
+            "three sorts as reference lines only (Just Sort It, binary insertion, and Ford–Johnson "
+            "merge insertion, which needs the fewest comparisons). The sorts assume a consistent "
+            "judge, which people are not."
         ),
         "",
         "## The judges",
@@ -670,7 +771,14 @@ def _report(
             "grows with fatigue, a lean toward the item shown first, occasional random answers "
             '(lapses; Wichmann & Hill 2001), "can\'t decide" on near-ties, and slower answers on '
             "close calls (the distance effect; Moyer & Landauer 1967). **perfect**: always right; a "
-            "sanity check. **noisy**: Bradley-Terry noise only, the model rankify assumes."
+            "sanity check. **noisy**: Bradley-Terry noise only, the model rankify assumes, as "
+            "accurate as the human judge. **sharp**, **normal**, **fuzzy**: the model rankify "
+            "assumes, telling neighbours on a 20-item list apart 90%, 75% and 60% of the time. "
+            "The rest are normal with one twist: **careless** answers 5% at random; **biased** "
+            "favours the item shown first (60% between equals); **thurstone** has normal-curve "
+            "noise; **similar** gives a quarter of the items a near-identical twin, and twins "
+            "shown together in a pick or ordering split one option's chance (Debreu 1960); "
+            "**tired** gets 1% noisier every round."
         ),
         "",
         (
@@ -872,7 +980,7 @@ def _report(
         for m in methods:
             if feature.startswith("Same answers") and m in (*ONLINE, "elo-close"):
                 cells.append("no: updates one match at a time")
-            elif m == "rankify-mixed" and m not in per:  # the same as rankify otherwise
+            elif m in VARIANTS and m not in per:  # the same as rankify otherwise
                 cells.append(per.get("rankify", default))
             else:
                 cells.append(per.get(m, default))
@@ -966,6 +1074,8 @@ def _ratios(runs_for, methods, n: int, j: str) -> list[str]:
         ("rankify", "elo", "G1: at most 50%"),
         ("rankify", "just-sort-it", "G2: at most 80%"),
         ("rankify-mixed", "rankify", "G3: under 100%"),
+        ("rankify", "rankify-closest", "order information against closest to 50/50"),
+        ("rankify", "rankify-per-round", "per second against per round"),
     ):
         if mine_m not in methods or other not in methods:
             continue

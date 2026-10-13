@@ -164,6 +164,64 @@ class _Need(Exception):
         self.pair = pair
 
 
+def ford_johnson_pair(
+    items: list[int], history: History, seed: int, sorted_out: list[int] | None = None
+) -> tuple[int, int] | None:
+    """Next comparison of merge insertion (Ford & Johnson 1959; Knuth, TAOCP vol. 3, 5.3.1),
+    which sorts with close to the fewest comparisons possible. Every answer is final and a
+    tie counts as a loss. None once the sort is done, and then ``sorted_out``, if given, is
+    filled with the sorted items, best first. The ranking shown comes from our fit."""
+    answers = iter(history)
+
+    def worse(x: int, y: int) -> bool:  # is x below y? asks the pair (x, y)
+        pair = (x, y)
+        entry = next(answers, None)
+        if entry is None:
+            raise _Need(pair)
+        return not _check(entry, pair)
+
+    def merge_insertion(xs: list[int]) -> list[int]:  # worst first
+        if len(xs) <= 1:
+            return list(xs)
+        pairs = []
+        for a, b in zip(xs[0::2], xs[1::2], strict=False):
+            pairs.append((b, a) if worse(a, b) else (a, b))  # (bigger, smaller)
+        bigs = merge_insertion([big for big, _ in pairs])
+        partner = dict(pairs)
+        chain = list(bigs)
+        smalls = [partner[b] for b in bigs]
+        if len(xs) % 2:
+            smalls.append(xs[-1])  # the odd one out has no partner to stay below
+        chain.insert(0, smalls[0])
+        done, k = 1, 2
+        while done < len(smalls):
+            group_end = min((2 ** (k + 1) + (-1) ** k) // 3, len(smalls))  # 3, 5, 11, 21, ...
+            for idx in range(group_end, done, -1):  # each group from its end, as Knuth does
+                s = smalls[idx - 1]
+                hi = chain.index(bigs[idx - 1]) if idx - 1 < len(bigs) else len(chain)
+                lo = 0
+                while lo < hi:
+                    mid = (lo + hi) // 2
+                    if worse(s, chain[mid]):
+                        hi = mid
+                    else:
+                        lo = mid + 1
+                chain.insert(lo, s)
+            done, k = group_end, k + 1
+        return chain
+
+    order = [int(x) for x in np.random.default_rng(seed).permutation(items)]
+    try:
+        ranked = merge_insertion(order)
+    except _Need as need:
+        return need.pair
+    if next(answers, None) is not None:
+        raise LogMismatch("the log has answers after the sort finished")
+    if sorted_out is not None:
+        sorted_out[:] = ranked[::-1]
+    return None
+
+
 def just_sort_it_pair(items: list[int], history: History, seed: int) -> tuple[int, int]:
     """Next comparison of repeated quicksort (Maystre & Grossglauser 2017).
 

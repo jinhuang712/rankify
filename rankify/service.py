@@ -6,7 +6,7 @@ import re
 import secrets
 from collections import Counter
 from collections.abc import Sequence
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from time import perf_counter
 
@@ -18,6 +18,7 @@ from rankify.engine.baselines import (
     History,
     elo_close_pair,
     elo_ratings,
+    ford_johnson_pair,
     glicko2_ratings,
     insertion_sort,
     just_sort_it_pair,
@@ -33,6 +34,7 @@ from rankify.engine.planner import (
     MIXED_PLANNER_NAME,
     PAIRS_ONLY,
     PLANNER_NAME,
+    VARIANTS,
     Timing,
     derive_seed,
     plan_round,
@@ -59,9 +61,12 @@ METHODS = (
     # reference lines: sorts that assume a consistent judge
     "just-sort-it",
     "insertion-sort",
+    "ford-johnson",
 )
-_FITTED = ("rankify", "arena", "just-sort-it")  # ranking comes from our Bradley-Terry fit
-_LEARNS_SIGMA = ("rankify", "just-sort-it")  # learn the prior width; arena keeps a flat prior
+# ranking comes from our Bradley-Terry fit
+_FITTED = ("rankify", "arena", "just-sort-it", "ford-johnson")
+# learn the prior width; arena keeps a flat prior
+_LEARNS_SIGMA = ("rankify", "just-sort-it", "ford-johnson")
 _RANDOM_PAIRS = ("elo", "glicko2", "trueskill", "openskill", "arena")
 _RATED = {
     "glicko2": glicko2_ratings,
@@ -247,6 +252,7 @@ class Rankify:
         seed: int | None = None,
         calibrate: bool = False,
         rounds: str = "pairs",
+        planner: str = "time",
     ) -> None:
         """Make a list. ``calibrate`` mixes in repeats of earlier pairs, with the sides swapped,
         so ``calibrate()`` can measure how consistent the judge is. ``rounds`` is "pairs" or
@@ -261,6 +267,10 @@ class Rankify:
             raise RankifyError(f"method must be one of: {', '.join(METHODS)}")
         if rounds not in ROUNDS:
             raise RankifyError(f"rounds must be one of: {', '.join(ROUNDS)}")
+        if planner not in VARIANTS:
+            raise RankifyError(f"planner must be one of: {', '.join(VARIANTS)}")
+        if planner != "time" and (method != "rankify" or rounds != "pairs" or calibrate):
+            raise RankifyError("planner variants are for benchmarking rankify on pairs")
         if store.get_list(self.conn, slug):
             raise RankifyError(f"list '{slug}' already exists")
         names = _clean_names(items)
@@ -272,6 +282,8 @@ class Rankify:
             "learn_sigma": method in _LEARNS_SIGMA,
             "rounds": rounds if method == "rankify" and not calibrate else "pairs",
         }
+        if planner != "time":
+            settings["planner"] = planner
         if calibrate:
             if method != "rankify":
                 raise RankifyError("calibration lists use the rankify method")
@@ -353,6 +365,8 @@ class Rankify:
                     plan, chosen = self._smart_plan(lst, judge, mode, seed)
                     kind, shown = chosen if chosen else ("pair", None)
                     planner = PLANNER_NAME if _pairs_only(lst) else MIXED_PLANNER_NAME
+                    if lst.settings.get("planner", "time") != "time":
+                        planner += f"/{lst.settings['planner']}"
                 else:
                     shown, planner = self._plan(lst, active, seed), _method(lst)
                 if shown is None:
@@ -854,9 +868,30 @@ class Rankify:
             if state.next_pair is None:
                 return None
             a, b = state.next_pair
+        elif method == "ford-johnson":
+            pair = ford_johnson_pair(active_pos, history, sort_seed)
+            if pair is None:
+                return None
+            a, b = pair
         else:
             a, b = just_sort_it_pair(active_pos, history, sort_seed)
         return ids[a], ids[b]
+
+    @staticmethod
+    def _sorted_rows(lst, rows, active, history, ids, params) -> list:
+        """Ford-Johnson, once its sort is done, shows the sort's own order: it treats every
+        answer as final, and our fit can order two items it never compared differently.
+        Confidence and Could be come from the fit, so they are left out then."""
+        order: list[int] = []
+        if ford_johnson_pair(active, history, derive_seed(lst.settings["seed"], 0), order):
+            return rows
+        params["finished"] = True
+        rank = {ids[p]: r for r, p in enumerate(order, start=1)}
+        out = [
+            replace(row, rank=rank[row.item_id], rank_lo=None, rank_hi=None, confidence=None)
+            for row in rows
+        ]
+        return sorted(out, key=lambda row: row.rank)
 
     def _compute(self, lst: store.ListRow, *, warm: bool) -> Refit:
         t0 = perf_counter()
@@ -916,6 +951,8 @@ class Rankify:
             ranks = [(s.index, s.rank_lo, s.rank_hi) for s in stats]
             nb = stop.neighbours(theta, cov, [s.index for s in stats])
             params["targets"] = {m: stop.target_reached(m, nb, ranks) for m in MODES}
+            if method == "ford-johnson":
+                rows = self._sorted_rows(lst, rows, active, history, ids, params)
         elif method in ("elo", "elo-close"):
             ratings = elo_ratings(len(ids), history)
             order = sorted(active, key=lambda k: (-ratings[k], k))
@@ -962,7 +999,10 @@ class Rankify:
         looks = _looks(r)
         avoid = frozenset(r.unanswered_sets)
         kinds = PAIRS_ONLY if _pairs_only(lst) else ALL_KINDS
-        plan = plan_round(mode, r.theta, r.theta_cov, r.ranks, timing, seed, looks, kinds, avoid)
+        variant = lst.settings.get("planner", "time")
+        plan = plan_round(
+            mode, r.theta, r.theta_cov, r.ranks, timing, seed, looks, kinds, avoid, variant
+        )
 
         def describe(c) -> dict:
             out = {

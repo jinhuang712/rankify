@@ -125,11 +125,13 @@ rankify rebuild travel            # refit with this version of rankify, after an
 ```sh
 rankify bench --items 10,20 --runs 20 --report experiments/2026-10-12-human-judge.md
 rankify bench --judges human,perfect,noisy --methods rankify,elo,glicko2
+rankify bench --judges sharp,normal,fuzzy,careless,biased,thurstone,similar,tired
+rankify bench --methods rankify,rankify-closest,rankify-per-round   # planner variants
 rankify bench --methods rankify,rankify-mixed --set-time-scale 0.5 --cache half.jsonl
 rankify new demo "Demo" --items items.txt --method trueskill   # run any method by hand
 ```
 
-`bench` draws hidden scores and runs every method through these same commands. A simulated judge answers each round, and the default is one that behaves like a person.
+`bench` draws hidden scores and runs every method through these same commands. A simulated judge answers each round, and the default is one that behaves like a person. The other judges each change one thing (EXPERIMENT.md, Part 1): `sharp`, `normal` and `fuzzy` answer as the model assumes, telling neighbours apart 90%, 75% and 60% of the time; `careless`, `biased`, `thurstone`, `similar` and `tired` are normal with one twist. Besides the rating systems, `--methods` takes the reference sorts `just-sort-it`, `insertion-sort` and `ford-johnson`, and two planner variants that check rankify's design: `rankify-closest` (the pair closest to 50/50) and `rankify-per-round` (information per round, not per second). They run with `new --planner`, a benchmark-only option.
 
 In `--methods`, `rankify` is rankify as shipped, and `rankify-mixed` is a list made with `--rounds mixed`. Both run once per mode. `--set-time-scale` multiplies how long the judge takes on pick and rank rounds, to test how much a result depends on that guess. `--cache` saves each finished run, so an interrupted benchmark resumes. Use a separate cache for each scale.
 

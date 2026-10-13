@@ -202,6 +202,32 @@ Why mixed forecasts still run high: real sessions shift toward orderings as the 
 
 Speed: a mixed forecast fits about 5 to 15 simulations into its 0.8 s budget, against about 10 to 60 for pairs. In the terminal UI on a 20-item mixed list, a key reaches the UI within 11 ms while a forecast runs (median 0.5 ms), and the next round is drawn 26 ms after the answer key (p95 30 ms), the cost of planning sets, not of the forecast. (A headless test's "key to next round" reads about 0.9 s, but that is Textual's test pilot waiting up to a second for the process to go idle while the forecast keeps it busy.)
 
+## Engine check: the full judge grid
+
+The engine comes before any interface: it should meet G1–G12 on a benchmark wider than one guessed human judge, or explain each miss, before a browser UI, a website or servers. This check fills in the grid EXPERIMENT.md planned for Phase 2, at a size this machine runs in a few hours.
+
+**Step 1 (2026-10-13): measure.** Built: the six missing judges (sharp, normal, fuzzy, careless, biased, thurstone, similar and tired, with the existing human, perfect and noisy), Ford–Johnson merge insertion as a reference sort, and two planner variants that check rankify's design (`rankify-closest`, `rankify-per-round`). Reports: [all judges](experiments/2026-10-12-judges-grid.md) (10 and 20 items, 20 lists each, 4,400 runs), [planner variants](experiments/2026-10-12-planner-variants.md), [50 items](experiments/2026-10-12-fifty-items.md) (human and normal judges, 10 lists each). The 100-item lists and 100 seeds per setting are left out: they would take days here.
+
+What it shows, for rankify on pairs:
+
+- **Model violations don't hurt it.** With judges who answer 5% at random, favour the first item, use a different noise curve, split votes between near-twins, or tire, rankify's Quick and Stable stops met their target in 15–20 of 20 lists on 20 items, with G8 at 95–100%. (Exact stops less often on 20 items within the budget; with the tired judge it met its target in 2 of the 6 lists that stopped.)
+- **G1 (half of Elo's time) holds wherever the judge tells neighbours apart 75% of the time or better**: 16–48% of Elo's time across sharp, normal, careless, biased, thurstone, similar and tired, at both sizes. It misses with the low-accuracy judges (human, noisy and fuzzy, 57–60%) on 10 items (55–79%), and with the noisy judge on 20 items, where rankify reached Quick in only 10 of 20 lists.
+- **G2 (80% of Just Sort It's time) mostly holds on 20 items**: 30–72% for the clearer judges, and 56–62% on Quick for the human and fuzzy judges. It misses for fuzzy Stable (100%) and similar Exact (90%). On 10 items rankify is about level with Just Sort It (48–106%).
+- **G5 (calibration) holds**: error 0.014–0.051 across 22 judge and size settings (one at 0.051). **G6 (Could be) doesn't**: it held the true rank 95–100% of the time almost everywhere, wider than the 85–95% it should be.
+- **G9 (order doesn't matter)**: the #1 never changed when answers were replayed in another order (0 of 440 lists; Elo 44 of 440).
+- **Mixed rounds (G3)**, at the guessed set times, are faster for the clearer judges in Stable and Exact (65–99% of the pairs time on 20 items) and on 10 items in most modes; on 20-item Quick they are slower for four of the seven (101–125%). Still decided by real times.
+- **Planner variants.** Order information against the pair closest to 50/50: on 20 items the 50/50 planner reached the targets far less often (Stable with the normal judge in 6 of 20 lists against 19; with the careless judge 3 against 20), though on 10 items it was sometimes quicker when it got there. Information per second against per round made no measurable difference on pairs, whose answer times vary little; it matters for choosing between pairs and orderings.
+- **Ford–Johnson** is the fastest sort for a perfect judge (Exact on 20 items in 62 rounds; rankify 81, mixed 22) and loses lists as answers get noisy: with the normal judge it reached Stable in 12 of 20 lists on 10 items and 8 of 20 on 20 items, and with the human judge 4 and 0.
+
+**Where the engine is weak:**
+
+- **Lists of 50 items, on pairs.** With the human judge, the Quick stop came at about 90 rounds with the true #1 on top in only 7 of 10 lists (G8 asks 9 of 10). With the normal judge it put the #1 right but the top 3 wrong, so Quick was really reached in only 4 of 10 lists. Mixed rounds reached Quick in 10 of 10. A likely cause is that two first looks per item aren't enough to rule an item out among 50.
+- **Low-accuracy judges stop Stable early.** On 20 items, Stable stopped with 85% (human) and 83% (noisy) of the top pairs right, against the 90% G8 asks.
+- **Could be is too wide** (G6), above.
+- **Small lists with a low-accuracy judge**: G1 and G2 miss on 10 items for human, noisy and fuzzy.
+
+Step 2 fixes these, then the benchmark runs again.
+
 ## Phase 5: Human pilot
 
 **Done early (2026-10-12):** the calibration tools are built: `new --calibrate`, a minimal `play`, `calibrate`, and `bench --judge-profile`. The first real calibration session comes next, before Phase 2.

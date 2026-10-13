@@ -72,7 +72,7 @@ def new(
         typer.Option(
             "--method",
             help="rankify, or a method to benchmark against: elo, elo-close, glicko2, "
-            "trueskill, openskill, arena, just-sort-it, insertion-sort.",
+            "trueskill, openskill, arena, just-sort-it, insertion-sort, ford-johnson.",
         ),
     ] = "rankify",
     seed: Annotated[int | None, typer.Option("--seed", help="Fix the random seed.")] = None,
@@ -93,6 +93,14 @@ def new(
             "save time in the benchmark yet.",
         ),
     ] = "pairs",
+    planner: Annotated[
+        str,
+        typer.Option(
+            "--planner",
+            hidden=True,
+            help="Benchmark only: time (rankify), per-round, or closest.",
+        ),
+    ] = "time",
     as_json: JsonOpt = False,
 ) -> None:
     """Make a new list."""
@@ -107,6 +115,7 @@ def new(
             seed=seed,
             calibrate=calibrate,
             rounds=rounds,
+            planner=planner,
         )
     except RankifyError as e:
         _fail(str(e))
@@ -535,7 +544,12 @@ def why(
 def bench(
     items: Annotated[str, typer.Option("--items", help="List sizes, comma-separated.")] = "10,20",
     judges: Annotated[
-        str, typer.Option("--judges", help="human, perfect, noisy.")
+        str,
+        typer.Option(
+            "--judges",
+            help="human, perfect, noisy, sharp, normal, fuzzy, careless, biased, thurstone, "
+            "similar, tired.",
+        ),
     ] = "human,perfect",
     methods: Annotated[
         str, typer.Option("--methods", help="Methods to compare, comma-separated.")

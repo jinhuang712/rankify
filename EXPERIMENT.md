@@ -102,6 +102,8 @@ We run every combination of:
 
 Runs are paired. For a given combination and seed, every method gets the same true scores and the same stream of random noise. This removes most of the run-to-run variation from the comparison.
 
+Run so far (2026-10-13): all eleven judges (these nine, plus the guessed human and the noisy model judge) at 10 and 20 items with 20 lists each, and 50 items with the human and normal judges and 10 lists each. Sharp, normal and fuzzy tell neighbours apart 90%, 75% and 60% of the time on 20-item lists of the benchmark's shape (Bradley–Terry slopes 9.02, 4.51 and 1.665); the human and noisy judges manage about 57%. The planner variants (closest to 50/50, per round) ran against the human, normal and careless judges. The 100-item lists and 100 seeds per combination are not run; they would take days on this machine.
+
 ### Stopping, fairly
 
 Baselines like Elo have no confidence target, so they can't decide when to stop. We give them an advantage. An oracle that knows the truth stops each baseline at the first round where its ranking meets the mode's accuracy definition, provided it stays there for the next 10 rounds. rankify gets no oracle. It stops on its own rule, and then we check its accuracy. If rankify wins under these rules, the win is real.
@@ -258,6 +260,12 @@ Results go in `experiments/`, one report per run, linked from here.
   - **G7, human judge:** met for pairs in Quick and Stable at both sizes (range held 76–89%, median off 14–24%) and for mixed Stable on 20 items (77%, 25%); mixed Stable on 10 items held 91%, just over the band. Not met for mixed Quick (median off 41–42%), mixed Exact (range held 53–62%) or pairs Exact (43% on 10 items, unscorable on 20).
   - **Perfect judge:** still fails.
   - Apart from forecasts and timings, every rankify run matches the Phase 4 benchmark exactly.
+- [2026-10-12: all judges](experiments/2026-10-12-judges-grid.md), [planner variants](experiments/2026-10-12-planner-variants.md) and [50 items](experiments/2026-10-12-fifty-items.md), run on 2026-10-13. 4,520 runs, none failed; the human and perfect runs of the other methods came from the last benchmark.
+  - **Robust to the judges that break the model** (careless, biased, thurstone, similar, tired): rankify's Quick and Stable stops met their target in 15–20 of 20 lists on 20 items, G8 at 95–100%.
+  - **G1** holds for every judge that tells neighbours apart 75% of the time or better (16–48% of Elo's time); it misses on 10 items for the three low-accuracy judges (55–79%), and for the noisy judge on 20. **G2** mostly holds on 20 items (missing for fuzzy Stable and similar Exact), and is about level with Just Sort It on 10.
+  - **G5** holds (calibration error 0.014–0.051). **G6** doesn't: Could be held the true rank 95–100% of the time almost everywhere.
+  - **Weak spots:** 50-item lists on pairs (the human judge's Quick stop had the #1 right in 7 of 10 lists; the normal judge's Quick was really reached in 4 of 10, mixed rounds in 10 of 10), and Stable stopping early on 20 items for the low-accuracy judges (83–85% of the top pairs right).
+  - **Planner variants:** order information reached the 20-item targets far more often than the pair closest to 50/50; per second against per round made no difference on pairs.
 - **Open-item checks** (seeds 70000+, 10 lists per setting, scored offline on saved session states with 24 simulations).
   - **Answer times:** giving each saved state the timing its session ended with took the 20-item mixed bias from +16% to +3% (Quick) and +10% to −1% (Stable), but barely moved 10 items (+24% to +22%). Predicting set times from the first few timed answers, and switching at the 8th as the planner does, didn't help (10-item mixed Stable went from 30% to 41% off): the oracle's gain came mostly from pair times, which mixed sessions measure last.
   - **Width re-learning:** letting the simulated fit learn its width again every 4 answers, from the drawn width, cut median errors in 6 of 8 settings (10-item mixed Stable 30% to 21%, 20-item pairs Stable 19% to 13%) with ranges about as often right. Starting the simulated fit from the real fit's width instead made the ranges worse (20-item mixed Quick held 71% against 90%).
