@@ -1,0 +1,40 @@
+normal   quick  old       rounds   70  repeats  41%  really right 10/10  stopped at target  6/10
+normal   quick  old-norep rounds   62  repeats   2%  really right  9/10  stopped at target  0/10
+normal   quick  new-norep rounds   49  repeats   1%  really right 10/10  stopped at target  0/10
+
+normal   stable old       rounds  146  repeats  45%  really right 10/10  stopped at target  3/10
+normal   stable old-norep rounds   87  repeats   2%  really right  7/10  stopped at target  0/10
+normal   stable new-norep rounds   84  repeats   3%  really right  8/10  stopped at target  0/10
+
+perfect  quick  old       rounds   58  repeats  31%  really right 10/10  stopped at target 10/10
+perfect  quick  old-norep rounds   62  repeats   0%  really right 10/10  stopped at target  0/10
+perfect  quick  new-norep rounds   48  repeats   1%  really right 10/10  stopped at target  0/10
+
+perfect  stable old       rounds  102  repeats  30%  really right 10/10  stopped at target 10/10
+perfect  stable old-norep rounds   89  repeats   0%  really right 10/10  stopped at target  0/10
+perfect  stable new-norep rounds   72  repeats   0%  really right 10/10  stopped at target  0/10
+
+careless quick  old       rounds   80  repeats  43%  really right 10/10  stopped at target  5/10
+careless quick  old-norep rounds   64  repeats   3%  really right  8/10  stopped at target  0/10
+careless quick  new-norep rounds   49  repeats   2%  really right  6/10  stopped at target  0/10
+
+careless stable old       rounds  138  repeats  44%  really right 10/10  stopped at target  1/10
+careless stable old-norep rounds   95  repeats   4%  really right  4/10  stopped at target  0/10
+careless stable new-norep rounds   84  repeats   4%  really right  2/10  stopped at target  0/10
+
+human    quick  old       rounds  105  repeats  51%  really right  9/10  stopped at target  2/10
+human    quick  old-norep rounds   68  repeats   7%  really right  5/10  stopped at target  0/10
+human    quick  new-norep rounds   60  repeats   9%  really right  6/10  stopped at target  0/10
+
+human    stable old       rounds  192  repeats  51%  really right  5/10  stopped at target  0/10
+human    stable old-norep rounds  111  repeats  10%  really right  0/10  stopped at target  0/10
+human    stable new-norep rounds  108  repeats  10%  really right  0/10  stopped at target  0/10
+
+noisy    quick  old       rounds  108  repeats  49%  really right  7/10  stopped at target  1/10
+noisy    quick  old-norep rounds   69  repeats   6%  really right  7/10  stopped at target  0/10
+noisy    quick  new-norep rounds   58  repeats   5%  really right  4/10  stopped at target  0/10
+
+noisy    stable old       rounds  184  repeats  48%  really right  3/10  stopped at target  0/10
+noisy    stable old-norep rounds  110  repeats   9%  really right  1/10  stopped at target  0/10
+noisy    stable new-norep rounds  106  repeats  10%  really right  3/10  stopped at target  0/10
+

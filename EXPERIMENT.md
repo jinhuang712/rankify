@@ -274,3 +274,14 @@ Results go in `experiments/`, one report per run, linked from here.
   - **G7, human judge:** met for pairs Stable, pairs Quick on 20 items and mixed Stable. Pairs Quick on 10 items held 69%. Not met for mixed Quick (median off 36% and 29%) or mixed Exact (range held 55–68%).
   - **Pairs Exact with 60 rounds per item:** range held 71% and 65%, median off 11% and 5%.
   - **Perfect judge:** still fails.
+- [2026-10-13: step 2, all judges](experiments/2026-10-13-step2-judges.md) and [50 items](experiments/2026-10-13-step2-fifty-items.md): another look before giving up, the narrower Could be, rounds left as a formula. The same lists as step 1.
+  - **50 items:** the normal judge's Quick was really met at the stop in 10 of 10 lists (step 1: 4). The human judge's in 3 of 10, with the true #1 on top in 8 of 10: still short of G8.
+  - **Rounds left (G7)** held in more settings than before in 41 of 44. Forecasts for clear judges still run long early.
+  - **Could be (G6)** held the true rank 92–100% of the time: still too wide for the clearer judges.
+- [2026-10-14: step 3, gap scale](experiments/2026-10-14-step3-gap-scale.md): the fit's gaps widened by the sharpness the answers surely show, and the benchmark driven through the service layer. Human, noisy, normal and perfect judges, 10 and 20 items, 50 lists each.
+  - **20 items:** the normal judge's Quick took 66 rounds instead of 76 and Stable 144 instead of 176; the perfect judge's Stable 104 instead of 129. The human and noisy judges were unchanged, with the same accuracy at the stop.
+  - **The service-layer driver** ran 1,200 runs in 325–395 s instead of 957 s, with the same statistics as the CLI-driven one.
+- [2026-10-14: step 4, fit and repeats](experiments/2026-10-14-step4-fit-and-repeats.md): practice lists only (seeds 70000 and up), 20 items, 10 lists per setting. The new fit and the repeat rules landed as switches, both off by default.
+  - **The Laplace fit squeezes scores** for judges who seldom contradict themselves (prior width about 2 against a true spread of about 10). Expectation propagation learns it about right. In sessions it stopped Quick 2–25% sooner for every judge; Stable got slower for most.
+  - **rankify repeated pairs** in 24–51% of Quick rounds; the benchmark's wasted-questions table had shown it since Phase 2. Asking a pair again only when the fit contradicts the judge's answers cut sessions by 17–45%, but right results at the stop fell from 84 to 59 of 100 sessions, mostly for judges who slip. One re-check per pair: 62 of 100.
+  - **Against sorting:** every rankify version reached each target 2 to 4 times sooner than Just Sort It. Against Ford–Johnson with a perfect judge, these lists and step 2's test lists disagree.

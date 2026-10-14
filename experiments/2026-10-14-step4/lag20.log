@@ -1,0 +1,59 @@
+== normal quick: stop median 70, right-at median 41 (10/10 right at the end), stopped at target 6/10, lag median 25
+   #1>#2 90%            failing in  36% of lag rounds; last to hold in 2 sessions
+   #2>#3 80%            failing in  55% of lag rounds; last to hold in 3 sessions
+   #3>#4 80%            failing in  51% of lag rounds; last to hold in 0 sessions
+   none below reaches   failing in  85% of lag rounds; last to hold in 7 sessions
+
+== normal stable: stop median 146, right-at median 71 (10/10 right at the end), stopped at target 3/10, lag median 76
+   top pair 1 90%       failing in  16% of lag rounds; last to hold in 0 sessions
+   top pair 2 90%       failing in  52% of lag rounds; last to hold in 3 sessions
+   top pair 3 90%       failing in  58% of lag rounds; last to hold in 2 sessions
+   top pair 4 90%       failing in  76% of lag rounds; last to hold in 3 sessions
+   top pair 5 90%       failing in  51% of lag rounds; last to hold in 2 sessions
+   tier cuts 90%        failing in  82% of lag rounds; last to hold in 1 sessions
+   none below reaches   failing in  82% of lag rounds; last to hold in 6 sessions
+
+== perfect quick: stop median 58, right-at median 42 (10/10 right at the end), stopped at target 10/10, lag median 17
+   #1>#2 90%            failing in  20% of lag rounds; last to hold in 0 sessions
+   #2>#3 80%            failing in  16% of lag rounds; last to hold in 0 sessions
+   #3>#4 80%            failing in  62% of lag rounds; last to hold in 0 sessions
+   none below reaches   failing in 100% of lag rounds; last to hold in 10 sessions
+
+== perfect stable: stop median 102, right-at median 64 (10/10 right at the end), stopped at target 10/10, lag median 37
+   top pair 1 90%       failing in  23% of lag rounds; last to hold in 0 sessions
+   top pair 2 90%       failing in  57% of lag rounds; last to hold in 0 sessions
+   top pair 3 90%       failing in  69% of lag rounds; last to hold in 0 sessions
+   top pair 4 90%       failing in  73% of lag rounds; last to hold in 0 sessions
+   top pair 5 90%       failing in  73% of lag rounds; last to hold in 1 sessions
+   tier cuts 90%        failing in  95% of lag rounds; last to hold in 2 sessions
+   none below reaches   failing in  99% of lag rounds; last to hold in 9 sessions
+
+== careless quick: stop median 80, right-at median 39 (10/10 right at the end), stopped at target 5/10, lag median 38
+   #1>#2 90%            failing in  29% of lag rounds; last to hold in 0 sessions
+   #2>#3 80%            failing in  38% of lag rounds; last to hold in 1 sessions
+   #3>#4 80%            failing in  56% of lag rounds; last to hold in 0 sessions
+   none below reaches   failing in  99% of lag rounds; last to hold in 10 sessions
+
+== careless stable: stop median 138, right-at median 78 (10/10 right at the end), stopped at target 1/10, lag median 70
+   top pair 1 90%       failing in  36% of lag rounds; last to hold in 1 sessions
+   top pair 2 90%       failing in  56% of lag rounds; last to hold in 2 sessions
+   top pair 3 90%       failing in  78% of lag rounds; last to hold in 4 sessions
+   top pair 4 90%       failing in  65% of lag rounds; last to hold in 1 sessions
+   top pair 5 90%       failing in  82% of lag rounds; last to hold in 4 sessions
+   tier cuts 90%        failing in  96% of lag rounds; last to hold in 3 sessions
+   none below reaches   failing in  95% of lag rounds; last to hold in 9 sessions
+
+== human quick: stop median 105, right-at median 60 (9/10 right at the end), stopped at target 2/10, lag median 25
+   #1>#2 90%            failing in  57% of lag rounds; last to hold in 3 sessions
+   #2>#3 80%            failing in  27% of lag rounds; last to hold in 1 sessions
+   #3>#4 80%            failing in  70% of lag rounds; last to hold in 5 sessions
+   none below reaches   failing in  99% of lag rounds; last to hold in 9 sessions
+
+== human stable: stop median 192, right-at median 164 (5/10 right at the end), stopped at target 0/10, lag median 17
+   top pair 1 90%       failing in  53% of lag rounds; last to hold in 4 sessions
+   top pair 2 90%       failing in  69% of lag rounds; last to hold in 3 sessions
+   top pair 3 90%       failing in  48% of lag rounds; last to hold in 2 sessions
+   top pair 4 90%       failing in  94% of lag rounds; last to hold in 4 sessions
+   top pair 5 90%       failing in  74% of lag rounds; last to hold in 3 sessions
+   tier cuts 90%        failing in  98% of lag rounds; last to hold in 4 sessions
+   none below reaches   failing in  97% of lag rounds; last to hold in 5 sessions

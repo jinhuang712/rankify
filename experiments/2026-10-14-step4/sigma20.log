@@ -1,0 +1,5 @@
+normal   learned sigma 1.94; true sd 9.58; fit's #1-#4 gap / true 0.52; gap scale 1.12; #8-#13 gap / true 0.00
+careless learned sigma 1.85; true sd 9.58; fit's #1-#4 gap / true 0.36; gap scale 1.13; #8-#13 gap / true 0.11
+perfect  learned sigma 2.05; true sd 9.58; fit's #1-#4 gap / true 0.51; gap scale 1.11; #8-#13 gap / true 0.06
+human    learned sigma 1.60; true sd 2.56; fit's #1-#4 gap / true 0.86; gap scale 1.00; #8-#13 gap / true 0.44
+noisy    learned sigma 1.62; true sd 2.56; fit's #1-#4 gap / true 1.12; gap scale 1.03; #8-#13 gap / true 0.28

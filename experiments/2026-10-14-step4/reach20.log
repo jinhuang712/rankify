@@ -1,0 +1,40 @@
+
+== normal quick: 310 lag rounds
+   blockers per round: median 5; their looks: median 3, share with 1-2 looks 33%
+   largest single chance below: median 10.7%; joint chance any below is really in: median 64.2%
+   at the stop: joint chance any below in: median 28.2%, P(#1 right) median 93.9%
+
+== normal stable: 687 lag rounds
+   blockers per round: median 1; their looks: median 10, share with 1-2 looks 0%
+   largest single chance below: median 10.7%; joint chance any below is really in: median 19.6%
+   at the stop: joint chance any below in: median 5.1%, P(#1 right) median 98.2%
+
+== perfect quick: 197 lag rounds
+   blockers per round: median 7; their looks: median 3, share with 1-2 looks 34%
+   largest single chance below: median 10.6%; joint chance any below is really in: median 70.7%
+   at the stop: joint chance any below in: median 28.9%, P(#1 right) median 95.4%
+
+== perfect stable: 382 lag rounds
+   blockers per round: median 1; their looks: median 5, share with 1-2 looks 13%
+   largest single chance below: median 11.9%; joint chance any below is really in: median 29.4%
+   at the stop: joint chance any below in: median 5.3%, P(#1 right) median 98.0%
+
+== careless quick: 363 lag rounds
+   blockers per round: median 3; their looks: median 4, share with 1-2 looks 23%
+   largest single chance below: median 12.3%; joint chance any below is really in: median 61.5%
+   at the stop: joint chance any below in: median 25.7%, P(#1 right) median 96.3%
+
+== careless stable: 705 lag rounds
+   blockers per round: median 1; their looks: median 8, share with 1-2 looks 4%
+   largest single chance below: median 15.1%; joint chance any below is really in: median 32.3%
+   at the stop: joint chance any below in: median 7.1%, P(#1 right) median 97.8%
+
+== human quick: 284 lag rounds
+   blockers per round: median 3; their looks: median 7, share with 1-2 looks 5%
+   largest single chance below: median 15.1%; joint chance any below is really in: median 64.0%
+   at the stop: joint chance any below in: median 47.9%, P(#1 right) median 91.7%
+
+== human stable: 194 lag rounds
+   blockers per round: median 1; their looks: median 22, share with 1-2 looks 0%
+   largest single chance below: median 16.2%; joint chance any below is really in: median 29.0%
+   at the stop: joint chance any below in: median 50.1%, P(#1 right) median 82.7%

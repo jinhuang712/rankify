@@ -1,0 +1,52 @@
+== hidden scores: t3
+normal   quick  laplace rounds    70  met 10/10  #1 right 10/10  top-quarter pairs 97%  0.2 s
+normal   quick  ep      rounds    60  met 10/10  #1 right 10/10  top-quarter pairs 91%  1.4 s
+normal   stable laplace rounds   146  met 10/10  #1 right 10/10  top-quarter pairs 100%  0.6 s
+normal   stable ep      rounds   136  met 10/10  #1 right 10/10  top-quarter pairs 100%  5.7 s
+
+perfect  quick  laplace rounds    58  met 10/10  #1 right 10/10  top-quarter pairs 91%  0.2 s
+perfect  quick  ep      rounds    44  met 10/10  #1 right 10/10  top-quarter pairs 97%  0.7 s
+perfect  stable laplace rounds   102  met 10/10  #1 right 10/10  top-quarter pairs 100%  0.4 s
+perfect  stable ep      rounds    82  met 10/10  #1 right 10/10  top-quarter pairs 100%  2.1 s
+
+careless quick  laplace rounds    80  met 10/10  #1 right 10/10  top-quarter pairs 94%  0.3 s
+careless quick  ep      rounds    70  met 10/10  #1 right 10/10  top-quarter pairs 100%  1.8 s
+careless stable laplace rounds   138  met 10/10  #1 right 10/10  top-quarter pairs 100%  0.5 s
+careless stable ep      rounds   146  met 10/10  #1 right 10/10  top-quarter pairs 100%  5.2 s
+
+human    quick  laplace rounds   105  met  9/10  #1 right  9/10  top-quarter pairs 86%  0.4 s
+human    quick  ep      rounds   100  met  5/10  #1 right  9/10  top-quarter pairs 81%  2.8 s
+human    stable laplace rounds   192  met  5/10  #1 right  9/10  top-quarter pairs 91%  0.9 s
+human    stable ep      rounds   198  met  3/10  #1 right  9/10  top-quarter pairs 89%  7.5 s
+
+noisy    quick  laplace rounds   108  met  7/10  #1 right  9/10  top-quarter pairs 80%  0.4 s
+noisy    quick  ep      rounds    98  met  8/10  #1 right 10/10  top-quarter pairs 94%  2.9 s
+noisy    stable laplace rounds   184  met  3/10  #1 right 10/10  top-quarter pairs 88%  0.8 s
+noisy    stable ep      rounds   209  met  9/10  #1 right 10/10  top-quarter pairs 100%  7.7 s
+
+== hidden scores: normal
+normal   quick  laplace rounds    96  met 10/10  #1 right 10/10  top-quarter pairs 93%  0.3 s
+normal   quick  ep      rounds    76  met  9/10  #1 right 10/10  top-quarter pairs 96%  2.3 s
+normal   stable laplace rounds   162  met  9/10  #1 right 10/10  top-quarter pairs 100%  0.7 s
+normal   stable ep      rounds   174  met 10/10  #1 right 10/10  top-quarter pairs 100%  7.3 s
+
+perfect  quick  laplace rounds    60  met 10/10  #1 right 10/10  top-quarter pairs 93%  0.2 s
+perfect  quick  ep      rounds    45  met 10/10  #1 right 10/10  top-quarter pairs 85%  0.7 s
+perfect  stable laplace rounds   104  met 10/10  #1 right 10/10  top-quarter pairs 100%  0.4 s
+perfect  stable ep      rounds    79  met  9/10  #1 right 10/10  top-quarter pairs 100%  2.0 s
+
+careless quick  laplace rounds    89  met 10/10  #1 right 10/10  top-quarter pairs 87%  0.3 s
+careless quick  ep      rounds    74  met 10/10  #1 right 10/10  top-quarter pairs 93%  1.9 s
+careless stable laplace rounds   158  met 10/10  #1 right 10/10  top-quarter pairs 100%  0.7 s
+careless stable ep      rounds   174  met  8/10  #1 right  9/10  top-quarter pairs 96%  6.7 s
+
+human    quick  laplace rounds   122  met  5/10  #1 right  8/10  top-quarter pairs 83%  0.4 s
+human    quick  ep      rounds   120  met  5/10  #1 right 10/10  top-quarter pairs 80%  3.3 s
+human    stable laplace rounds   202  met  1/10  #1 right 10/10  top-quarter pairs 80%  0.9 s
+human    stable ep      rounds   221  met  2/10  #1 right  8/10  top-quarter pairs 73%  8.0 s
+
+noisy    quick  laplace rounds   121  met  5/10  #1 right 10/10  top-quarter pairs 79%  0.4 s
+noisy    quick  ep      rounds   108  met  8/10  #1 right 10/10  top-quarter pairs 90%  3.0 s
+noisy    stable laplace rounds   180  met  5/10  #1 right 10/10  top-quarter pairs 93%  0.8 s
+noisy    stable ep      rounds   228  met  2/10  #1 right 10/10  top-quarter pairs 85%  7.6 s
+

@@ -1,0 +1,65 @@
+== perfect quick
+   old           to target  1.8 min (10/10); stops at  2.5 min,  58 rounds, right at stop 10/10, repeats 31%
+   new-norep     to target  1.2 min (10/10); stops at  2.1 min,  48 rounds, right at stop 10/10, repeats 1%
+   new-once      to target  1.2 min (10/10); stops at  1.9 min,  44 rounds, right at stop 10/10, repeats 21%
+   just-sort-it  to target  2.8 min (10/10)
+   ford-johnson  to target  2.2 min (10/10)
+== perfect stable
+   old           to target  2.7 min (10/10); stops at  4.9 min, 102 rounds, right at stop 10/10, repeats 30%
+   new-norep     to target  1.8 min (10/10); stops at  3.2 min,  72 rounds, right at stop 10/10, repeats 0%
+   new-once      to target  2.2 min (10/10); stops at  3.8 min,  76 rounds, right at stop 10/10, repeats 21%
+   just-sort-it  to target  5.0 min (10/10)
+   ford-johnson  to target  3.1 min (10/10)
+
+== normal quick
+   old           to target  1.8 min (10/10); stops at  3.0 min,  70 rounds, right at stop 10/10, repeats 39%
+   new-norep     to target  1.2 min (10/10); stops at  2.1 min,  49 rounds, right at stop 10/10, repeats 1%
+   new-once      to target  1.3 min (10/10); stops at  2.5 min,  54 rounds, right at stop 10/10, repeats 23%
+   just-sort-it  to target  4.2 min (10/10)
+   ford-johnson  to target  2.1 min (8/10)
+== normal stable
+   old           to target  3.1 min (10/10); stops at  7.7 min, 146 rounds, right at stop 10/10, repeats 44%
+   new-norep     to target  2.5 min (8/10); stops at  4.0 min,  84 rounds, right at stop  8/10, repeats 3%
+   new-once      to target  2.5 min (7/10); stops at  4.2 min,  86 rounds, right at stop  6/10, repeats 21%
+   just-sort-it  to target  5.1 min (10/10)
+   ford-johnson  to target — (3/10)
+
+== careless quick
+   old           to target  1.7 min (10/10); stops at  3.8 min,  80 rounds, right at stop 10/10, repeats 42%
+   new-norep     to target  1.5 min (6/10); stops at  2.1 min,  49 rounds, right at stop  6/10, repeats 2%
+   new-once      to target  1.4 min (9/10); stops at  2.3 min,  58 rounds, right at stop  9/10, repeats 26%
+   just-sort-it  to target  4.0 min (9/10)
+   ford-johnson  to target  3.0 min (7/10)
+== careless stable
+   old           to target  3.3 min (10/10); stops at  6.7 min, 138 rounds, right at stop 10/10, repeats 42%
+   new-norep     to target — (3/10); stops at  3.8 min,  84 rounds, right at stop  2/10, repeats 4%
+   new-once      to target  3.5 min (7/10); stops at  5.0 min,  97 rounds, right at stop  7/10, repeats 22%
+   just-sort-it  to target  9.2 min (9/10)
+   ford-johnson  to target — (0/10)
+
+== human quick
+   old           to target  2.8 min (9/10); stops at  5.1 min, 105 rounds, right at stop  9/10, repeats 49%
+   new-norep     to target  2.3 min (6/10); stops at  2.7 min,  60 rounds, right at stop  6/10, repeats 8%
+   new-once      to target — (4/10); stops at  2.6 min,  63 rounds, right at stop  4/10, repeats 22%
+   just-sort-it  to target 10.9 min (7/10)
+   ford-johnson  to target — (5/10)
+== human stable
+   old           to target — (5/10); stops at  9.7 min, 192 rounds, right at stop  5/10, repeats 50%
+   new-norep     to target — (0/10); stops at  5.1 min, 108 rounds, right at stop  0/10, repeats 10%
+   new-once      to target — (1/10); stops at  6.1 min, 122 rounds, right at stop  0/10, repeats 25%
+   just-sort-it  to target — (3/10)
+   ford-johnson  to target — (1/10)
+
+== noisy quick
+   old           to target  3.0 min (8/10); stops at  5.2 min, 108 rounds, right at stop  7/10, repeats 49%
+   new-norep     to target — (5/10); stops at  2.5 min,  58 rounds, right at stop  4/10, repeats 5%
+   new-once      to target  1.8 min (7/10); stops at  2.8 min,  66 rounds, right at stop  5/10, repeats 25%
+   just-sort-it  to target  8.1 min (7/10)
+   ford-johnson  to target — (5/10)
+== noisy stable
+   old           to target  8.4 min (6/10); stops at  9.1 min, 184 rounds, right at stop  3/10, repeats 48%
+   new-norep     to target — (4/10); stops at  4.9 min, 106 rounds, right at stop  3/10, repeats 9%
+   new-once      to target — (2/10); stops at  5.6 min, 120 rounds, right at stop  1/10, repeats 25%
+   just-sort-it  to target — (3/10)
+   ford-johnson  to target — (0/10)
+

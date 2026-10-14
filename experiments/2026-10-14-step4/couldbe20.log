@@ -1,0 +1,8 @@
+normal   quick  Could be holds the true rank 98%; rankify's own draws say 92%; one-rank ranges 6%
+normal   stable Could be holds the true rank 98%; rankify's own draws say 93%; one-rank ranges 16%
+perfect  quick  Could be holds the true rank 99%; rankify's own draws say 92%; one-rank ranges 6%
+perfect  stable Could be holds the true rank 100%; rankify's own draws say 93%; one-rank ranges 22%
+human    quick  Could be holds the true rank 96%; rankify's own draws say 92%; one-rank ranges 2%
+human    stable Could be holds the true rank 96%; rankify's own draws say 92%; one-rank ranges 3%
+noisy    quick  Could be holds the true rank 95%; rankify's own draws say 92%; one-rank ranges 2%
+noisy    stable Could be holds the true rank 94%; rankify's own draws say 92%; one-rank ranges 6%

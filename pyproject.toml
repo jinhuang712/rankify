@@ -27,6 +27,7 @@ markers = ["perf: timing tests against the latency budget"]
 
 [tool.ruff]
 line-length = 100
+extend-exclude = ["experiments"]  # one-off analysis scripts, kept as run
 
 [tool.pyright]
 venvPath = "."

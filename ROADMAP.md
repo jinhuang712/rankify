@@ -277,6 +277,43 @@ Still open:
 - **The sharpness reading** ignores how the scores of two compared items move together, which raises it by about 0.1–0.2.
 - Forecasts for clear judges still run long early, and late in Stable sessions they run short (see step 2).
 
+**Step 4 (2026-10-14, in progress; landed with both new switches off): shorter sessions.** Report: [fit and repeats](experiments/2026-10-14-step4-fit-and-repeats.md), on practice lists (seeds 70000 and up, 10 lists per setting, 20 items).
+
+The problem is session length: people give up after about 20–30 answers. Three causes were found: rankify doubts itself too much with judges who seldom contradict themselves, it asks the same pair again and again, and its stopping rules were tuned to the first cause. The redesign keeps five aims, agreed on 2026-10-14:
+
+- Doubt is honest for every judge, from one model rather than a fix per kind of judge.
+- A session stops as soon as the mode's promise holds, and not before.
+- Few hand-set numbers, each with a written reason, checked on more than one kind of judge and more than one shape of hidden scores.
+- Rounds left says what the next sitting of 20–30 answers will settle, not only the total.
+- A few milliseconds per answer, from formulas rather than simulation.
+
+Found:
+
+- **The Laplace fit squeezes the scores.** With clear judges it learns a prior width of about 2 against a true spread of about 10, so the #1 to #4 gap comes out at 36–52% of its true size and the middle of the list at 0–11%. At its Quick stop rankify gave a 26–29% chance that an outsider belonged in the top 3; the top 3 was right in 30 of 30 sessions. The starting belief about the width is not the cause: with a flat one the width moved from 1.94 to 2.05.
+- **Expectation propagation (EP) learns the width about right:** 10.1 against 9.6 with plain pairs, and the #1–#4 gap at 0.94 of its true size against 0.52.
+- **rankify repeats pairs.** In Quick sessions 24–51% of rounds asked a pair already asked, one pair up to 25 times in a session. The benchmark's wasted-questions table had shown it since Phase 2 (79% exact repeats for the 10-item human judge in step 3's report), and the planner treats every answer as a fresh coin flip, so a close pair always looks worth asking again.
+
+Built, behind switches:
+
+- `engine/ep.py`: EP for pair answers with "can't decide" and the first-slot bonus, learning the prior width, bonus and tie weight; per-answer moments by quadrature at the peak for narrow cavities and a closed-form step plus a trapezoid grid for wide ones; Anderson acceleration; warm starts from the last fit's factors. `service.EP_FIT`, off by default. Lists with pick or rank rounds keep Laplace.
+- `planner.ASK_AGAIN`, `"always"` by default (as before): with `"contradicted"` the planner asks a pair the judge has answered again only when the fit now orders it against those answers, and with `"once"` it allows one re-check of any pair; both at most twice in all. Only the asking judge's own answers count.
+
+Results so far:
+
+- **EP alone:** Quick stopped 2–25% sooner for every judge, still right; Stable got slower for most judges (up to 27%), Guess: the tier and "reach" rules, which judge rarely asked items, are where honest doubt costs most.
+- **EP and no repeats:** 17–45% fewer rounds and repeats down from 30–51% to 0–10%, but judges who slip are left with their slips: the careless judge's Stable was right in 2 of 10 lists instead of 10, the human judge's in 0 instead of 5. No session reached its own target; every one ended at "nothing worth asking".
+- **One re-check per pair instead:** right at the stop in 62 of 100 sessions, against 59 with "only when contradicted" and 84 shipped. It rescued the careless judge (Stable 7 of 10) but not the human and noisy judges, and still spent a quarter of all rounds on re-checks.
+- **Against sorting:** every rankify version reached each target 2 to 4 times sooner than Just Sort It, and Ford–Johnson failed Stable in at least 7 of 10 lists once the judge made mistakes. With a perfect judge, EP reached Quick in 1.2 minutes against Ford–Johnson's 2.2 on these lists, but on step 2's test lists Ford–Johnson was ahead (1.1 against 1.6), so that is unsettled.
+
+Open:
+
+- **How to re-check.** Neither rule keeps shipped accuracy for judges who slip. Next candidate: re-check only the pairs that decide the mode's target, with the new stop test deciding when the result is right rather than the floor giving up.
+- **Whether a pair answered once, with nothing against it, counts as settled.** Without repeats, rankify can't get 90–95% sure of a neighbour pair. With the rule on, three planner tests that expect "target reached" with a perfect judge fail, though those sessions end with the right order.
+- **EP's speed.** About 40 ms per answer on 20 items against about 4 ms for Laplace; 200 items is not measured (goal G4: under 50 ms).
+- **The careless judge** stays squeezed with EP (#1–#4 gap at 0.51): its random slips aren't in the model.
+
+Next: settle the re-check rule, then the stop test (stop when the mode's whole target holds in 90% of the posterior draws Could be already makes, replacing the 90/80/80 pair levels, the per-item reach rule and Stable's tier cuts), then EP's speed, picks and orderings in EP, rounds left, and the full benchmark.
+
 ## Phase 5: Human pilot
 
 **Done early (2026-10-12):** the calibration tools are built: `new --calibrate`, a minimal `play`, `calibrate`, and `bench --judge-profile`. The first real calibration session comes next, before Phase 2.
