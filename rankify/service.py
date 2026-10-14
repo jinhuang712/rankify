@@ -16,6 +16,7 @@ import numpy as np
 
 from rankify import store
 from rankify.engine import ENGINE_VERSION, stop
+from rankify.engine import planner as planning
 from rankify.engine.baselines import (
     History,
     elo_close_pair,
@@ -28,6 +29,7 @@ from rankify.engine.baselines import (
     trueskill_ratings,
 )
 from rankify.engine.calibration import JudgeProfile, estimate_profile
+from rankify.engine.ep import fit_pairs_ep
 from rankify.engine.fit import fit_pairs, fit_pairs_learning_sigma, initial_x
 from rankify.engine.forecast import FORECAST_NAME, Habits, forecast_rounds
 from rankify.engine.model import A_WINS, B_WINS, TIE, Choices, Pairs, Prior
@@ -38,6 +40,7 @@ from rankify.engine.planner import (
     PLANNER_NAME,
     VARIANTS,
     Timing,
+    answered_pairs,
     derive_seed,
     plan_round,
     random_pair,
@@ -77,6 +80,9 @@ _RATED = {
 }
 ARENA_SIGMA = 10.0  # Chatbot Arena fits Bradley-Terry with almost no prior
 CALIBRATE = True  # rankify widens the fit's gaps by the sharpness the judge surely has
+# rankify fits pair-only lists by expectation propagation (engine/ep.py) instead of Laplace,
+# and then needs no widening; lists with pick or rank rounds keep Laplace for now
+EP_FIT = False
 CALIBRATION_REPEATS = 0.15  # share of calibration rounds that repeat an earlier pair
 _REPEAT_GAP = 8  # never repeat one of the last few pairs, so the judge can't just remember it
 _SLUG = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
@@ -245,6 +251,7 @@ class Rankify:
         self.conn = conn
         self.judge = judge
         self._fits: dict[int, tuple[tuple, Refit]] = {}  # list id -> (state key, its fit)
+        self._ep_factors: dict[int, tuple[list, tuple | None]] = {}  # list id -> (answers, factors)
 
     # ------------------------------------------------------------ lists and items
 
@@ -828,6 +835,13 @@ class Rankify:
             out.append((pos[first], pos[second], y))
         return out
 
+    def _own_history(self, lst: store.ListRow, judge: int, item_ids: list[int]) -> History:
+        """The pair answers this judge gave, as positions in ``item_ids``: what the planner
+        must not ask the same person again (another judge may still be asked the pair)."""
+        pos = {iid: k for k, iid in enumerate(item_ids)}
+        rounds = [r for r in store.effective_rounds(self.conn, lst.id) if r.judge_id == judge]
+        return self._history(lst, pos, rounds)
+
     @staticmethod
     def _set_rounds(rounds, pos: dict[int, int]) -> list[tuple[list, list]]:
         """Answered pick and rank rounds in log order: (shown, answer), as item positions."""
@@ -918,6 +932,7 @@ class Rankify:
         upto = store.last_round_id(self.conn, lst.id)
         x, iterations, params = None, 0, {}
         theta = cov = ranks = None
+        by_ep = False
 
         if method in _FITTED:
             pairs = Pairs.of(*zip(*history, strict=True)) if history else Pairs.of([], [], [])
@@ -926,19 +941,27 @@ class Rankify:
             x0 = self._warm_start(lst, ids, prior) if warm else None
             if lst.settings.get("learn_sigma", method in _LEARNS_SIGMA):
                 sigma0 = self._last_sigma(lst) if warm else None
-                fit = fit_pairs_learning_sigma(
-                    len(ids), pairs, prior, x0=x0, sigma0=sigma0, choices=choices
-                )
+                if method == "rankify" and EP_FIT and not set_rounds:
+                    factors = self._ep_start(lst.id, history) if warm else None
+                    fit = fit_pairs_ep(len(ids), pairs, prior, x0=x0, sigma0=sigma0, sites=factors)
+                    self._ep_factors[lst.id] = (history, fit.state)
+                    by_ep = True
+                else:
+                    fit = fit_pairs_learning_sigma(
+                        len(ids), pairs, prior, x0=x0, sigma0=sigma0, choices=choices
+                    )
             else:
                 fit = fit_pairs(len(ids), pairs, prior, x0=x0, choices=choices)
             theta, cov = fit.theta, fit.theta_cov
             x, iterations = fit.x, fit.iterations
-            params = {
+            params: dict = {
                 "bias_points": fit.bias * SCORE_SCALE,
                 "tie_weight": fit.tie,
                 "sigma": fit.sigma or prior.sigma,
             }
-            if method == "rankify" and CALIBRATE:
+            if by_ep:
+                params["fit"] = "ep"
+            elif method == "rankify" and CALIBRATE:
                 judge = store.judge_id(self.conn, self.judge)
                 params["gap_scale"] = _gap_scale(
                     store.answers_with_prior_fit(self.conn, lst.id, judge, SHARPNESS_ANSWERS)
@@ -1026,6 +1049,10 @@ class Rankify:
             kinds,
             avoid,
             variant,
+            # (read only when the planner limits repeats: it costs a pass over the log)
+            None
+            if planning.ASK_AGAIN == "always"
+            else answered_pairs(self._own_history(lst, judge, ids)),
         )
 
         def describe(c) -> dict:
@@ -1080,6 +1107,22 @@ class Rankify:
             candidates=record["candidates"],
             timing=record["timing"],
         )
+
+    def _ep_start(self, list_id: int, history: list) -> tuple | None:
+        """Warm start for an EP fit: the last EP fit's factors for the answers it shares with
+        ``history`` from the start (all of them after a new answer), empty ones for the rest."""
+        cached = self._ep_factors.get(list_id)
+        if cached is None or cached[1] is None:
+            return None
+        old, (tau, nu) = cached
+        same = 0
+        for x, y in zip(old, history):
+            if x != y:
+                break
+            same += 1
+        t, v = np.zeros(len(history)), np.zeros(len(history))
+        t[:same], v[:same] = tau[:same], nu[:same]
+        return t, v
 
     def _last_sigma(self, lst: store.ListRow) -> float | None:
         fit = store.latest_fit(self.conn, lst.id)

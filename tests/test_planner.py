@@ -237,3 +237,46 @@ def test_before_giving_up_every_item_still_in_play_gets_six_looks(monkeypatch):
     looks[5] = planner.TOPUP_LOOKS
     plan = planner.plan_round("stable", theta, cov, ranks, planner.Timing(), 1, looks)
     assert plan.chosen is None and plan.reason == "nothing worth asking"
+
+
+def test_answered_pairs_tally_each_side_and_every_ask():
+    from rankify.engine.model import TIE
+    from rankify.engine.planner import answered_pairs
+
+    history = [(0, 1, A_WINS), (1, 0, A_WINS), (0, 1, TIE), (2, 0, B_WINS)]
+    # (0, 1): item 0 won, then item 1 won, then can't decide; (0, 2): item 0 won
+    assert answered_pairs(history) == {(0, 1): (0, 3), (0, 2): (1, 1)}
+
+
+def test_a_pair_comes_back_only_as_the_repeat_rule_allows(monkeypatch):
+    """With "contradicted", a pair the judge answered comes back only when the fit now orders
+    it against those answers, and never a third time; "once" allows one re-check of any pair;
+    "always" (the default) never holds a pair back."""
+    from rankify.engine import planner
+
+    i, j = np.array([0]), np.array([1])
+    agrees, disagrees = np.array([1.0, 0.0]), np.array([0.0, 1.0])
+    item0_won_once = {(0, 1): (1, 1)}
+    assert planner._askable(i, j, agrees, item0_won_once)[0]  # "always"
+    monkeypatch.setattr(planner, "ASK_AGAIN", "contradicted")
+    assert not planner._askable(i, j, agrees, item0_won_once)[0]
+    assert planner._askable(i, j, disagrees, item0_won_once)[0]
+    assert not planner._askable(i, j, disagrees, {(0, 1): (1, 2)})[0]  # asked twice already
+    assert not planner._askable(i, j, disagrees, {(0, 1): (0, 1)})[0]  # only "can't decide"
+    assert planner._askable(np.array([0]), np.array([2]), np.array([1.0, 0, 0]), item0_won_once)[0]
+    monkeypatch.setattr(planner, "ASK_AGAIN", "once")
+    assert planner._askable(i, j, agrees, item0_won_once)[0]
+    assert not planner._askable(i, j, agrees, {(0, 1): (1, 2)})[0]
+
+
+def test_the_repeat_rule_counts_only_the_asking_judges_answers(conn, monkeypatch):
+    from rankify.engine import planner
+
+    monkeypatch.setattr(planner, "ASK_AGAIN", "contradicted")
+    ana, ben = Rankify(conn, judge="ana"), Rankify(conn, judge="ben")
+    ana.create_list("p", "P", ["x", "y"], seed=1)
+    view = ana.next_round("p")
+    ana.answer("p", [[i.name for i in view.items].index("x") + 1])
+    with pytest.raises(NothingToAsk):
+        ana.next_round("p")  # ana said x > y, and nothing says otherwise
+    assert {i.name for i in ben.next_round("p").items} == {"x", "y"}  # ben never answered it

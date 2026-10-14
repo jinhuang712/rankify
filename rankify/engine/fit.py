@@ -29,6 +29,7 @@ class Fit:
     iterations: int
     log_posterior: float
     sigma: float | None = None  # the prior width the fit used, when it was learned
+    state: tuple | None = None  # an EP fit's per-answer factors, to warm-start the next fit
 
     @property
     def theta(self) -> np.ndarray:

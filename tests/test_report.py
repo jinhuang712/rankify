@@ -43,7 +43,7 @@ def test_report_finds_upsets_slow_answers_and_the_judges_habits(rk):
 def test_judges_who_disagree_are_shown(conn):
     a, b = Rankify(conn, judge="ana"), Rankify(conn, judge="ben")
     a.create_list("p", "P", ["x", "y"], seed=1)
-    for _ in range(3):
+    for _ in range(1):  # a judge is asked a pair once, unless their other answers contradict it
         view = a.next_round("p")
         a.answer("p", [[i.name for i in view.items].index("x") + 1])
         view = b.next_round("p")

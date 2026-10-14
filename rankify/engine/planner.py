@@ -21,10 +21,19 @@ from statistics import NormalDist
 import numpy as np
 
 from rankify.engine import stop
-from rankify.engine.model import K_MAX
+from rankify.engine.model import A_WINS, K_MAX, TIE
 
 PLANNER_NAME = "order-info-pair-0.2"
 MIXED_PLANNER_NAME = "order-info-mixed-0.3"  # pairs, picks and rankings
+# Whether a pair the judge has answered may be asked again. The model treats every answer as
+# a fresh coin flip, so a close pair always looks worth asking again, and 24-51% of Quick
+# rounds were repeats; but a person remembers and answers the same way. "contradicted": only
+# when the fit now orders the pair against the judge's own answers on it; "once": one
+# re-check of any pair; both at most MAX_ASKS times in all. Both cut sessions by about half
+# but left judges who slip with their slips (experiments/2026-10-14-step4-fit-and-repeats.md),
+# so the default stays "always" until the stop rules are redone.
+ASK_AGAIN = "always"
+MAX_ASKS = 2
 # Stop when even FLOOR_ANSWERS more answers to the most useful pair would teach less than
 # FLOOR_BITS about the order that matters. Judged over several answers, not one: a judge
 # who gets a pair right 60% of the time teaches only 0.03 bits per answer, but it adds up.
@@ -259,6 +268,38 @@ def plan_pair(
     return plan_round(mode, theta, cov, ranks, timing, seed, looks, PAIRS_ONLY)
 
 
+def answered_pairs(history) -> dict[tuple[int, int], tuple[int, int]]:
+    """For each pair asked so far, keyed lower position first: (the lower position's wins
+    minus the other's, times asked). "Can't decide" counts as asked, for neither side."""
+    out: dict[tuple[int, int], tuple[int, int]] = {}
+    for a, b, y in history:
+        key = (min(a, b), max(a, b))
+        net, asks = out.get(key, (0, 0))
+        if y != TIE:
+            winner = a if y == A_WINS else b
+            net += 1 if winner == key[0] else -1
+        out[key] = (net, asks + 1)
+    return out
+
+
+def _askable(i: np.ndarray, j: np.ndarray, theta: np.ndarray, answered) -> np.ndarray:
+    """Which of the pairs (i, j) may be asked: any pair not asked yet, and a pair asked before
+    only when the fit now puts it in the opposite order to the judge's own answers on it."""
+    keep = np.ones(len(i), dtype=bool)
+    if not answered or ASK_AGAIN == "always":
+        return keep
+    for k, (p, q) in enumerate(zip(i.tolist(), j.tolist(), strict=True)):
+        key = (p, q) if p < q else (q, p)
+        seen = answered.get(key)
+        if seen is not None:
+            net, asks = seen
+            contradicted = net * (theta[key[0]] - theta[key[1]]) < 0
+            # "once": any pair may get one re-check when it is worth asking; else only
+            # a contradicted pair may
+            keep[k] = (ASK_AGAIN == "once" or contradicted) and asks < MAX_ASKS
+    return keep
+
+
 def plan_round(
     mode: str,
     theta: np.ndarray,
@@ -270,11 +311,14 @@ def plan_round(
     kinds: tuple[str, ...] = ALL_KINDS,
     avoid: frozenset = frozenset(),
     variant: str = "time",
+    answered: dict | None = None,
 ) -> Plan:
     """The next round for ``mode``. ``ranks`` holds (position, rank_lo, rank_hi) for the
     active items, best first. ``looks`` counts the answers that involved each item.
     ``kinds`` are the round kinds allowed; ``avoid`` holds sets (as frozensets of positions)
-    not to show again, because the judge couldn't decide on them.
+    not to show again, because the judge couldn't decide on them. ``answered`` holds the
+    pairs asked so far (see ``answered_pairs``); they are asked again only as ``_askable``
+    allows.
 
     Every item first gets ``MIN_LOOKS`` answers. An item that has barely been compared sits
     in the middle of the ranking with a wide range, so without this it could be ignored even
@@ -300,6 +344,8 @@ def plan_round(
     else:
         i, j = _candidate_pairs(order, play)
         reason = "best value"
+    keep = _askable(i, j, theta, answered)
+    i, j = i[keep], j[keep]
     if len(i) == 0:
         return Plan(None, [], "nothing worth asking", len(play))
     region = _Region(mode, theta, cov, order, seed, everything=bool(unseen))
@@ -335,7 +381,7 @@ def plan_round(
     if not unseen:
         later = order_information_over(mu[best], var[best], FLOOR_ANSWERS) * relevance[best]
         if later.max(initial=0.0) < FLOOR_BITS:
-            look = _another_look(order, play, looks, theta, cov, region, timing, rng)
+            look = _another_look(order, play, looks, theta, cov, region, timing, rng, answered)
             if look is not None:
                 return Plan(look, [look], "another look", len(play))
             return Plan(None, candidates, "nothing worth asking", len(play))
@@ -350,15 +396,22 @@ def plan_round(
     return Plan(candidates[0], candidates, reason, len(play))
 
 
-def _another_look(order, play, looks, theta, cov, region, timing, rng) -> Candidate | None:
+def _another_look(
+    order, play, looks, theta, cov, region, timing, rng, answered=None
+) -> Candidate | None:
     """When the floor would stop: the least-seen item still in play, if it has fewer than
-    TOPUP_LOOKS answers, against the partner whose answer is worth most per second."""
+    TOPUP_LOOKS answers, against the partner whose answer is worth most per second, among
+    the partners it may still be asked about."""
     short = sorted((looks.get(p, 0), p) for p in play if looks.get(p, 0) < TOPUP_LOOKS)
-    if not short:
+    for _, new in short:
+        others = np.array([q for q in order if q != new])
+        i, j = np.full(len(others), new), others
+        keep = _askable(i, j, theta, answered)
+        if np.any(keep):
+            i, j = i[keep], j[keep]
+            break
+    else:
         return None
-    new = short[0][1]
-    others = np.array([q for q in order if q != new])
-    i, j = np.full(len(others), new), others
     mu = theta[i] - theta[j]
     var = np.maximum(cov[i, i] + cov[j, j] - 2 * cov[i, j], 1e-12)
     margin = closeness(mu, var)
