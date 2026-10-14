@@ -5,6 +5,7 @@ import json
 import math
 import re
 import secrets
+import statistics
 from collections import Counter
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field, replace
@@ -75,6 +76,7 @@ _RATED = {
     "openskill": openskill_ratings,
 }
 ARENA_SIGMA = 10.0  # Chatbot Arena fits Bradley-Terry with almost no prior
+CALIBRATE = True  # rankify widens the fit's gaps by the sharpness the judge surely has
 CALIBRATION_REPEATS = 0.15  # share of calibration rounds that repeat an earlier pair
 _REPEAT_GAP = 8  # never repeat one of the last few pairs, so the judge can't just remember it
 _SLUG = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
@@ -183,6 +185,9 @@ class Refit:
     ms: float
     theta: np.ndarray | None = None  # scores and covariance, for methods that have them
     theta_cov: np.ndarray | None = None
+    # How much wider the gaps between scores really are than the fit says (see _gap_scale).
+    # Confidence, Could be, stopping and planning use theta times this.
+    gap_scale: float = 1.0
     # (position, reach_lo, reach_hi), best first: the ranges the stopping rules use
     ranks: list[tuple[int, int, int]] | None = None
     history: list = field(default_factory=list)  # pair answers, as item positions
@@ -598,6 +603,7 @@ class Rankify:
             "mode": mode or lst.settings["mode"],
             "theta": r.theta,
             "cov": r.theta_cov,
+            "calibration": r.gap_scale,
             "active": [p for p, _, _ in r.ranks],
             "looks": _looks(r),
             "seed": derive_seed(lst.settings["seed"], r.upto_round_id or 0, 3),
@@ -932,16 +938,23 @@ class Rankify:
                 "tie_weight": fit.tie,
                 "sigma": fit.sigma or prior.sigma,
             }
+            if method == "rankify" and CALIBRATE:
+                judge = store.judge_id(self.conn, self.judge)
+                params["gap_scale"] = _gap_scale(
+                    store.answers_with_prior_fit(self.conn, lst.id, judge, SHARPNESS_ANSWERS)
+                )
         elif method in _RATED:
             theta, sd = _RATED[method](len(ids), history)
             cov = np.diag(sd**2)
 
+        gap_scale = float(params.get("gap_scale", 1.0))
         if theta is not None:
             stats = summarize(
                 theta,
                 cov,
                 np.array(active, dtype=np.int64),
                 seed=derive_seed(lst.settings["seed"], upto or 0, 1),
+                gap_scale=gap_scale,
             )
             rows = [
                 store.FitItemRow(
@@ -950,7 +963,7 @@ class Rankify:
                 for s in stats
             ]
             ranks = [(s.index, s.reach_lo, s.reach_hi) for s in stats]  # for stopping
-            nb = stop.neighbours(theta, cov, [s.index for s in stats])
+            nb = stop.neighbours(theta * gap_scale, cov, [s.index for s in stats])
             params["targets"] = {m: stop.target_reached(m, nb, ranks) for m in MODES}
             if method == "ford-johnson":
                 rows = self._sorted_rows(lst, rows, active, history, ids, params)
@@ -980,6 +993,7 @@ class Rankify:
             (perf_counter() - t0) * 1000,
             theta=theta,
             theta_cov=cov,
+            gap_scale=gap_scale,
             ranks=ranks,
             history=history,
             set_rounds=set_rounds,
@@ -1002,7 +1016,16 @@ class Rankify:
         kinds = PAIRS_ONLY if _pairs_only(lst) else ALL_KINDS
         variant = lst.settings.get("planner", "time")
         plan = plan_round(
-            mode, r.theta, r.theta_cov, r.ranks, timing, seed, looks, kinds, avoid, variant
+            mode,
+            r.theta * r.gap_scale,
+            r.theta_cov,
+            r.ranks,
+            timing,
+            seed,
+            looks,
+            kinds,
+            avoid,
+            variant,
         )
 
         def describe(c) -> dict:
@@ -1130,12 +1153,30 @@ def _looks(r: Refit) -> Counter:
 SITTING_GAP = timedelta(minutes=30)  # a longer pause starts a new sitting
 SHARPNESS_ANSWERS = 200  # the judge's latest answers that measure their sharpness
 SHARPNESS_SD = 0.5  # prior sd of its log: about 1, unless the answers say otherwise
+GAP_SURE = 0.9  # gaps widen only by the sharpness the answers show at this level
 _SHARPNESS_GRID = np.exp(np.linspace(np.log(0.25), np.log(8.0), 57))
+_Z_SURE = statistics.NormalDist().inv_cdf(GAP_SURE)
 
 
 def _sharpness(answers) -> float:
     """The most likely sharpness; see ``_sharpness_belief``."""
     return _sharpness_belief(answers)[0]
+
+
+def _gap_scale(answers) -> float:
+    """How much wider than the fit says the gaps between scores are, for Confidence, Could
+    be, stopping and planning: the judge's sharpness, as far as the answers show it at
+    GAP_SURE (one-sided), and never below 1.
+
+    The fit compresses the gaps: by the end of a session every simulated judge answers more
+    decisively than it predicts, the one that follows the model exactly too. Widening by the
+    whole reading cut clear judges' sessions by 30-50% with the targets still met, but
+    stopped error-prone judges early with worse rankings. Their reading (1.4-1.6) is lower
+    than clear judges' (about 2) yet still well above 1, and it is never sure to within a
+    factor of about 1.6 in benchmark sessions (the sd of its log stays near 0.36). The lower bound keeps about 1.3
+    for clear judges, and about 1 for the error-prone ones and early in any session."""
+    k, sd = _sharpness_belief(answers)
+    return max(1.0, k * math.exp(-_Z_SURE * sd))
 
 
 def _sharpness_belief(answers) -> tuple[float, float]:

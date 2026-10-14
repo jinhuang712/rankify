@@ -20,7 +20,7 @@ from rankify.engine.forecast import (
     score,
 )
 from rankify.engine.planner import ALL_KINDS, order_information_over
-from rankify.service import _sharpness, _sharpness_belief, _sittings
+from rankify.service import _gap_scale, _sharpness, _sharpness_belief, _sittings
 
 from .conftest import SimulatedJudge, run_rounds
 
@@ -177,6 +177,22 @@ def test_sharpness_is_unsure_until_answers_say_much():
     assert _sharpness_belief([]) == (1.0, 0.5)
     few, many = _sharpness_belief(answers[:10])[1], _sharpness_belief(answers)[1]
     assert many < few <= 0.5 and many < 0.15
+
+
+def test_gaps_widen_only_by_the_sharpness_the_answers_surely_show():
+    rng = np.random.default_rng(7)
+    model, perfect = [], []
+    for _ in range(300):
+        mu, sd = rng.normal(0, 1.5), 0.3
+        truth = rng.normal(mu, np.sqrt(2) * sd)
+        before = {1: (mu, sd), 2: (0.0, sd)}
+        won = 1 if rng.random() < 1 / (1 + np.exp(-truth)) else 2
+        model.append(("pair", [1, 2], [won], before))
+        perfect.append(("pair", [1, 2], [1 if truth > 0 else 2], before))
+    assert _gap_scale([]) == 1.0
+    assert _gap_scale(perfect[:5]) == 1.0  # too few answers to be sure of anything
+    assert _gap_scale(model) < 1.05
+    assert 1.2 < _gap_scale(perfect) < _sharpness(perfect)
 
 
 def test_an_unsure_sharpness_widens_the_range():

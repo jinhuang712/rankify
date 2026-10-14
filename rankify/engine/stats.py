@@ -36,12 +36,15 @@ def summarize(
     *,
     seed: int,
     draws: int = 1000,
+    gap_scale: float = 1.0,
 ) -> list[ItemStat]:
     """Rank the items at ``indices`` and describe how sure the ranking is.
 
     ``theta`` and ``cov`` cover every item in the fit. Only ``indices`` are ranked, so
     removed items still inform the fit but don't take up a place. The Could be range
     is drawn from the normal approximation, with a fixed seed so it can be rebuilt.
+    Confidence and Could be take the gaps between scores as ``gap_scale`` times wider
+    than the fit says (the judge's measured sharpness); scores and sds stay the fit's.
     """
     idx = np.asarray(indices, dtype=np.int64)
     k = len(idx)
@@ -55,7 +58,8 @@ def summarize(
     scores = SCORE_MEAN + SCORE_SCALE * (mu - mu.mean())
     sds = np.sqrt(np.clip(np.diag(s), 0.0, None))
 
-    rank_lo, rank_hi, reach_lo, reach_hi = _rank_ranges(mu, s, order, seed=seed, draws=draws)
+    wide = mu * gap_scale
+    rank_lo, rank_hi, reach_lo, reach_hi = _rank_ranges(wide, s, order, seed=seed, draws=draws)
 
     out = []
     for r, i in enumerate(order):
@@ -63,7 +67,7 @@ def summarize(
         if r + 1 < k:
             j = order[r + 1]
             var = s[i, i] + s[j, j] - 2.0 * s[i, j]
-            diff = mu[i] - mu[j]
+            diff = wide[i] - wide[j]
             conf = _normal_cdf(diff / math.sqrt(var)) if var > 0 else (1.0 if diff > 0 else 0.5)
         out.append(
             ItemStat(

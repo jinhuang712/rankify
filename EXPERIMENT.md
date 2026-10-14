@@ -20,11 +20,11 @@ Goal numbers refer to [GOALS.md](GOALS.md).
 Every change to rankify is compared against rating systems built for human judges with `rankify bench`, and the report is saved in `experiments/`. The benchmark runs each method the way a person would use it:
 
 1. Draw hidden scores for N items. The shape is a few clear favourites and a crowded middle (a Student-t distribution with 3 degrees of freedom).
-2. Make a fresh list with `rankify new --method <method>`.
-3. Each round, `rankify next --json` asks a question. A simulated judge compares the two items' hidden scores and answers with `rankify answer --round` or `--cant-decide`. Then `rankify show --json` records the method's current ranking.
-4. Stop at the round budget, or when the method says it has nothing left to ask (exit code 3).
+2. Make a fresh list, as `rankify new --method <method>` does.
+3. Each round, the next round asks a question, as `rankify next` does. A simulated judge compares the two items' hidden scores and answers it, or says it can't decide. Then the method's current ranking is recorded, as `rankify show` prints it.
+4. Stop at the round budget, or when the method says it has nothing left to ask.
 
-Every method sees the same hidden lists. The calls run in-process through the real CLI code. A separate sample times real `rankify` subprocesses.
+Every method sees the same hidden lists. The calls go through the service layer: the functions the CLI and the TUI call, with the same database, planner and stopping rules, held open for the session as the TUI holds it. Only the command-line parsing and JSON are left out; until 2026-10-14 the benchmark ran the CLI commands themselves, which took about a third of each session's time. A separate sample times real `rankify` subprocesses, and the CLI's own tests run whole sessions through it.
 
 **The methods.** The main comparison is with rating systems built for human judges: `elo`, `elo-close` (Elo with pairs of close ratings), `glicko2`, `trueskill`, `openskill` and `arena` (random pairs with a Bradley–Terry fit, the way Chatbot Arena works). Two sorts run as reference lines only: `just-sort-it` and `insertion-sort`. Sorting assumes a judge who answers the same way every time, and people don't, so the sorts show the floor for a perfect judge rather than a fair competitor.
 

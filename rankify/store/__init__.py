@@ -670,15 +670,18 @@ def answers_with_prior_fit(
         " WHERE u.outcome = 'undo' AND u.undoes = r.id) ORDER BY r.id DESC LIMIT ?",
         (list_id, judge, limit),
     ).fetchall()
-    fit_ids = sorted({r["fit_id"] for r in rows if r["fit_id"] is not None})
+    # Only the shown items of each fit: on long lists, every item of 200 fits is too many.
+    wanted = sorted(
+        {(r["fit_id"], i) for r in rows if r["fit_id"] is not None for i in json.loads(r["shown"])}
+    )
     scores: dict[tuple[int, int], tuple[float, float]] = {}
-    for start in range(0, len(fit_ids), 500):
-        chunk = fit_ids[start : start + 500]
-        marks = ",".join("?" * len(chunk))
+    for start in range(0, len(wanted), 400):
+        chunk = wanted[start : start + 400]
+        marks = ",".join("(?, ?)" for _ in chunk)
         for f in conn.execute(
-            f"SELECT fit_id, item_id, theta, sd FROM fit_items WHERE fit_id IN ({marks})"
-            " AND theta IS NOT NULL AND sd IS NOT NULL",
-            chunk,
+            f"SELECT fit_id, item_id, theta, sd FROM fit_items WHERE (fit_id, item_id) IN"
+            f" (VALUES {marks}) AND theta IS NOT NULL AND sd IS NOT NULL",
+            [x for pair in chunk for x in pair],
         ):
             scores[(f["fit_id"], f["item_id"])] = (f["theta"], f["sd"])
     out = []

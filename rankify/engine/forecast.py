@@ -199,7 +199,8 @@ def score(m: np.ndarray, tie: float) -> tuple[np.ndarray, np.ndarray]:
 
 def _done(m, sd, z, tie_ok, rel) -> np.ndarray:
     """Whether a gap N(m, sd^2) is done: confident at quantile z, a confident tie where one
-    counts, or below the floor at relevance ``rel`` (z, tie_ok and rel broadcast)."""
+    counts, or below the floor at relevance ``rel`` (z, tie_ok and rel broadcast). ``m`` is
+    already widened by the judge's sharpness, as the stopping rules see it."""
     ok = np.abs(m) >= z * sd
     if np.any(tie_ok):
         p_tie = _phi((stop.TIE_MARGIN - m) / sd) - _phi((-stop.TIE_MARGIN - m) / sd)
@@ -207,7 +208,7 @@ def _done(m, sd, z, tie_ok, rel) -> np.ndarray:
     return ok | (rel * later_bits(m, sd * sd) < FLOOR_BITS)
 
 
-def path_answers(m0, v0, d, level, tie_ok, rel, tie: float = 0.0):
+def path_answers(m0, v0, d, level, tie_ok, rel, tie: float = 0.0, calibration: float = 1.0):
     """(answers, estimate, precision) at which each pair is done, for flat arrays: today's
     estimate ``m0`` of the gap and its variance ``v0``, the true gap ``d`` (in the fit's
     units, as the judge answers), the Confidence ``level`` it must reach, whether a
@@ -217,7 +218,8 @@ def path_answers(m0, v0, d, level, tie_ok, rel, tie: float = 0.0):
     z = _z(level)
     answers = np.zeros(len(m0))
     m_end, prec_end = np.asarray(m0, dtype=float).copy(), 1.0 / v0
-    todo = np.flatnonzero(~_done(m0, np.sqrt(v0), z, tie_ok, rel))  # often most are done
+    k = calibration  # the stopping rules see the fit's gaps widened by this
+    todo = np.flatnonzero(~_done(k * m0, np.sqrt(v0), z, tie_ok, rel))  # often most are done
     if len(todo) == 0:
         return answers, m_end, prec_end
     m0, v0, d, z, tie_ok, rel = m0[todo], v0[todo], d[todo], z[todo], tie_ok[todo], rel[todo]
@@ -235,7 +237,7 @@ def path_answers(m0, v0, d, level, tie_ok, rel, tie: float = 0.0):
             n = np.where(moves, (m - m0[:, None]) * p0[:, None] / (drive - g), flat)
         n = np.maximum.accumulate(np.nan_to_num(np.maximum(n, 0.0), nan=np.inf), axis=1)
         prec = p0[:, None] + n * h
-        return n, m, prec, _done(m, 1.0 / np.sqrt(prec), z, tie_ok, rel)
+        return n, m, prec, _done(k * m, 1.0 / np.sqrt(prec), z, tie_ok, rel)
 
     rows = np.arange(len(todo))
     n, m, prec, ok = walk(np.broadcast_to(_U, (len(todo), len(_U))), _N_FLAT)
@@ -361,7 +363,9 @@ def _gap_columns(M: np.ndarray, i: np.ndarray, j: np.ndarray) -> np.ndarray:
     )
 
 
-def _answers(S, mean, truth, line, a, b, needs: _Needs, scale, tie: float) -> np.ndarray:
+def _answers(
+    S, mean, truth, line, a, b, needs: _Needs, scale, tie: float, calibration: float = 1.0
+) -> np.ndarray:
     """(draws, pairs) answers for each pair the mode needs. ``S`` (draws, k, k) is each
     draw's covariance, ``mean`` and ``truth`` (draws, k) its fit and true scores, ``line``
     (draws,) the true score of the last item in the settled part, ``a`` and ``b`` the items
@@ -379,7 +383,7 @@ def _answers(S, mean, truth, line, a, b, needs: _Needs, scale, tie: float) -> np
     now = S[rows, i, i] + S[rows, j, j] - 2 * S[rows, i, j]
     got, m_end, prec = path_answers(
         est[:, core].ravel(), now.ravel(), d[:, core].ravel(), level[:, core].ravel(),
-        tie_ok[:, core].ravel(), rel[:, core].ravel(), tie,
+        tie_ok[:, core].ravel(), rel[:, core].ravel(), tie, calibration,
     )  # fmt: skip
     n[:, core] = got.reshape(i.shape)
     m_end, prec = m_end.reshape(i.shape), prec.reshape(i.shape)
@@ -401,14 +405,14 @@ def _answers(S, mean, truth, line, a, b, needs: _Needs, scale, tie: float) -> np
             e = int(np.flatnonzero(core == needs.edge)[0])
             spread2 = np.minimum(spread2, var_after[np.arange(draws), a[:, needs.edge]])
             # a pair below matters as much as the edge item belongs to the settled part
-            edge_conf = _phi(np.abs(m_end[:, e]) * np.sqrt(prec[:, e]))
+            edge_conf = _phi(calibration * np.abs(m_end[:, e]) * np.sqrt(prec[:, e]))
             rel[:, below] = np.maximum(edge_conf, needs.rel_floor)[:, None]
         rb = b[:, below]
         start = float(line.mean()) - mean[rows, rb]
         now = spread2[:, None] + var_after[rows, rb]
         n[:, below] = path_answers(
             start.ravel(), now.ravel(), d[:, below].ravel(), level[:, below].ravel(),
-            tie_ok[:, below].ravel(), rel[:, below].ravel(), tie,
+            tie_ok[:, below].ravel(), rel[:, below].ravel(), tie, calibration,
         )[0].reshape(rb.shape)  # fmt: skip
     return n
 
@@ -431,6 +435,7 @@ def forecast_rounds(
     sigma: float | None = None,
     cap: int | None = None,
     draws: int = DRAWS,
+    calibration: float = 1.0,
     **_planner,
 ) -> Forecast:
     """Rounds left until rankify stops in ``mode``. ``active`` holds the positions of the
@@ -471,7 +476,7 @@ def forecast_rounds(
     n = np.zeros(a.shape)
     for _ in range(2):  # fatigue: the noise averaged over the calls still to come
         scale = (sharp * past / noise)[:, None]
-        n = _answers(S, tr.mean, tr.truth, line, a, b, needs, scale, habits.tie)
+        n = _answers(S, tr.mean, tr.truth, line, a, b, needs, scale, habits.tie, calibration)
         calls = np.minimum(n.sum(axis=1), cap * per_round)
         noise = habits.noise_over(float(effort), calls)
     owed = sum(max(0, MIN_LOOKS - looks.get(int(p), 0)) for p in pos)

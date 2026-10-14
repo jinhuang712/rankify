@@ -251,6 +251,32 @@ Still open:
 - **Stable stops early for low-accuracy judges:** on 20 items it stopped with 87% (human) and 83% (noisy) of the top pairs right, against the 90% G8 asks.
 - **G1 on 10 items with low-accuracy judges** still misses. Pairs can't tell such judges' items apart much faster; this is accepted as a limit of pairs.
 
+**Step 3 (2026-10-14): the judge's sharpness, and a faster benchmark.** Report: [gap scale](experiments/2026-10-14-step3-gap-scale.md), with the human, noisy, normal and perfect judges on 10 and 20 items, 50 lists each. Elo and Just Sort It came from step 2's runs.
+
+Changed:
+
+- **The forecast draws the judge's sharpness from what the answers say about it.** While they say little, the range covers both an ordinary and a decisive judge. On the saved sessions the range held 2–8 points more often; medians barely moved.
+- **The fit's gaps are widened by the sharpness the answers surely show** (see DESIGN.md, Fitting). Widening by the whole reading cut clear judges' sessions by 30–50%, but it stopped error-prone judges early: on 20-item Quick lists the human judge's true #1 was on top in 43 of 50 lists instead of 49. The lower 90% bound keeps part of the gain and leaves the error-prone judges as they were.
+- **The benchmark calls the service layer.** It now runs the functions the CLI and the terminal UI call, in one open session, instead of running each CLI command. Command parsing, JSON and reopening the database had taken most of the time: 1,200 runs took 325–395 s instead of 957 s. Sessions don't match the CLI-driven ones round for round. Refitting in another order changes scores in the 13th digit, and that breaks exact ties between items not yet asked about differently. Over 50 lists per setting, the two drivers agree (medians within 4 rounds).
+
+What the benchmark shows, on 20 items, against the same lists without the gap scale:
+
+- **Normal judge:** Quick took 66 rounds instead of 76, Stable 144 instead of 176, and Exact 361 instead of 370. Targets were met at the stop as often as before (Stable 47 of 50, from 48).
+- **Perfect judge:** Quick took 58 rounds instead of 62, Stable 104 instead of 129, and Exact 180 instead of 244. All were met.
+- **Human and noisy judges:** rounds within 5 of before, with the same accuracy at the stop. The human judge's Quick still has the true #1 on top in 49 of 50 lists, and Stable has 86% of top pairs right (from 87%).
+- **10 items:** little change, except the normal judge's Exact (130 rounds instead of 146).
+
+Looked at and left as is:
+
+- **Scale.** At 200 items, an answer takes about 29 ms to the next round: about 12 ms for the Could be draws, 9 ms for the refit and 3 ms for planning. A closed-form rank distribution matched the draws but was slower at 200 items (27 ms against 11), so the draws stay for lists of up to 200 items.
+- **Stable stops early for low-accuracy judges.** Asking more before giving up (a lower floor) raised the noisy judge's top pairs to 97% right, but it took 50% more rounds; the human judge stayed at 87–90% with 50–95% more rounds. It is a trade of time for accuracy, and the floor stays.
+
+Still open:
+
+- **Could be (G6)** is still too wide for the clearer judges: 98–100% coverage against 85–95%. The compressed fit is the cause, and the gap scale did not change it.
+- **The sharpness reading** ignores how the scores of two compared items move together, which raises it by about 0.1–0.2.
+- Forecasts for clear judges still run long early, and late in Stable sessions they run short (see step 2).
+
 ## Phase 5: Human pilot
 
 **Done early (2026-10-12):** the calibration tools are built: `new --calibrate`, a minimal `play`, `calibrate`, and `bench --judge-profile`. The first real calibration session comes next, before Phase 2.

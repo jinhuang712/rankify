@@ -86,7 +86,7 @@ def build(rk, slug: str) -> dict:
 
     theta, cov = r.theta, r.theta_cov
     order = [p for p, _, _ in r.ranks]
-    nb = stop.neighbours(theta, cov, order)
+    nb = stop.neighbours(theta * r.gap_scale, cov, order)
     level = stop.EXACT_LEVEL if ranking.mode == "exact" else stop.STABLE_LEVEL
     compared = {frozenset((a, b)) for _, a, b in said}
     compared |= {

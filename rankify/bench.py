@@ -1,18 +1,19 @@
-"""Benchmark rankify against rating systems built for human judges, through the CLI.
+"""Benchmark rankify against rating systems built for human judges, through the service layer.
 
 The protocol (see EXPERIMENT.md):
 
 1. Draw hidden scores for N items: a few clear favourites and a crowded middle.
-2. For each method, make a fresh list with ``rankify new --method <method>``.
-3. Each round, ``rankify next --json`` asks a question. A simulated judge compares the two
-   items' hidden scores the way a person would (noisy, slower on close calls, sometimes
-   unsure) and answers with ``rankify answer --round`` or ``--cant-decide``. Then
-   ``rankify show --json`` records the method's current ranking.
-4. Stop at the round budget, or when the method has nothing left to ask (exit code 3).
+2. For each method, make a fresh list, as ``rankify new --method <method>`` does.
+3. Each round, the next round asks a question, as ``rankify next`` does. A simulated judge
+   compares the two items' hidden scores the way a person would (noisy, slower on close
+   calls, sometimes unsure) and answers it, or says it can't decide. Then the method's
+   current ranking is recorded, as ``rankify show`` prints it.
+4. Stop at the round budget, or when the method has nothing left to ask.
 
-Every method goes through the same commands. Calls run in-process through Typer's test
-runner, which is the real CLI code path without process start-up. A separate sample
-times real subprocess calls.
+Every method goes through the same calls: the service functions the CLI and the TUI call,
+with the same database, planner and stopping rules, held open for the whole session as the
+TUI holds it. Only the command-line parsing and JSON are left out. A separate sample times
+real ``rankify`` subprocess calls, and the CLI's own tests run whole sessions through it.
 """
 
 import itertools
@@ -237,31 +238,23 @@ def _unpack(profile: dict | None) -> tuple[HumanParams, float]:
 # ---------------------------------------------------------------- one run
 
 
-class Cli:
-    """Calls the real CLI in-process and times each call."""
+class Session:
+    """One list's session through the service layer, in an in-memory database; times the
+    calls a person's rounds make (named after the CLI commands that make them)."""
 
-    def __init__(self, db: Path):
-        from typer.testing import CliRunner
+    def __init__(self):
+        from rankify import store
+        from rankify.service import Rankify
 
-        from rankify.cli.main import app
-
-        self.runner, self.app, self.db = CliRunner(), app, db
+        self.rk = Rankify(store.connect(":memory:"))
         self.ms: dict[str, list[float]] = {"next": [], "answer": [], "show": []}
 
-    def call(self, *args: str) -> tuple[int, str]:
+    def call(self, name: str, fn, *args, **kwargs):
         t0 = time.perf_counter()
-        result = self.runner.invoke(self.app, ["--db", str(self.db), *args])
-        if args[0] in self.ms:
-            self.ms[args[0]].append((time.perf_counter() - t0) * 1000)
-        if result.exception and not isinstance(result.exception, SystemExit):
-            raise result.exception
-        return result.exit_code, result.stdout
-
-    def ok(self, *args: str) -> str:
-        code, out = self.call(*args)
-        if code != 0:
-            raise RuntimeError(f"rankify {' '.join(args)} exited with {code}: {out}")
-        return out
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            self.ms[name].append((time.perf_counter() - t0) * 1000)
 
 
 @dataclass
@@ -348,7 +341,7 @@ def targets_met(order: list[str], theta: dict[str, float], margin: float = TIE_M
 def run_one(
     method: str, judge_kind: str, n: int, seed: int, budget: int, profile: dict | None = None
 ) -> RunResult:
-    """One hidden list, one method, through the CLI. ``method`` may name a mode, as in
+    """One hidden list, one method, through the service layer. ``method`` may name a mode, as in
     ``rankify:quick``; rankify runs once per mode so each target is measured in its mode.
     ``rankify-mixed`` is rankify with pick and rank rounds as well as pairs."""
     params, spread = _unpack(profile)
@@ -378,96 +371,89 @@ def run_one(
         cols[loser] = True
         known |= np.outer(rows, cols)
 
-    with tempfile.TemporaryDirectory() as tmp:
-        db, items = Path(tmp) / "bench.db", Path(tmp) / "items.txt"
-        items.write_text("\n".join(names), encoding="utf-8")
-        cli = Cli(db)
-        cli.ok(
-            "new",
-            "bench",
-            "Benchmark",
-            "--items",
-            str(items),
-            "--method",
-            base_method,
-            "--mode",
-            mode or "stable",
-            "--seed",
-            str(seed),
-            "--rounds",
-            rounds_kind,
-            *(["--planner", planner] if planner != "time" else []),
-        )
-        ranking = None
-        effort = 0  # fatigue grows per call made: a ranking of k counts as k - 1 pairs
-        for _ in range(budget):
-            if base_method == "rankify" and planner == "time" and res.rounds in FORECAST_AT:
-                f = json.loads(cli.ok("forecast", "bench", "--json"))
-                res.forecasts.append([res.rounds, f["median"], f["low"], f["high"], f["at_least"]])
-            code, out = cli.call("next", "bench", "--json", "--no-forecast")
-            if code == 3:
-                res.finished = True
-                break
-            if code != 0:
-                raise RuntimeError(f"next exited with {code}")
-            round_ = json.loads(out)
-            shown = [i["name"] for i in round_["items"]]
-            kind = round_["kind"]
-            idx = [index[x] for x in shown]
-            res.kinds.append(kind)
-            res.repeats.append(frozenset(idx) in seen)
-            seen.add(frozenset(idx))
-            if kind == "pair":
-                a, b = idx
-                res.implied.append(bool(known[a, b] or known[b, a]))
-                pick, seconds = judge.answer(shown, effort)
-                timed = ("--round", str(round_["round"]), "--ms", str(int(seconds * 1000)))
-                if pick is None:
-                    cli.ok("answer", "bench", "--cant-decide", *timed)
-                    log.append((a, b, 2))
-                    res.ties += 1
-                else:
-                    cli.ok("answer", "bench", str(pick), *timed)
-                    log.append((a, b, 0 if pick == 1 else 1))
-                    learn(*((a, b) if pick == 1 else (b, a)))
-            else:
-                if kind == "pick":  # implied when earlier answers already name the best
-                    res.implied.append(any(known[x, [y for y in idx if y != x]].all() for x in idx))
-                else:
-                    res.implied.append(all(known[x, y] or known[y, x] for x, y in _pairs(idx)))
-                numbers, seconds = judge.answer_set(shown, kind, effort)
-                timed = ("--round", str(round_["round"]), "--ms", str(int(seconds * 1000)))
-                cli.ok("answer", "bench", *map(str, numbers), *timed)
-                answer = [idx[k - 1] for k in numbers]
-                log.append(("set", idx, answer))
-                if kind == "pick":
-                    for x in idx:
-                        if x != answer[0]:
-                            learn(answer[0], x)
-                else:
-                    for x, y in _pairs(answer):
-                        learn(x, y)
-            effort += len(shown) - 1
-            res.seconds.append(seconds)
+    from rankify.service import NothingToAsk
 
-            ranking = json.loads(cli.ok("show", "bench", "--json"))
-            order = [i["name"] for i in ranking["items"]]
-            res.rounds += 1
-            res.taus.append(kendall_tau(order, theta))
-            for t, ok in targets_met(order, theta).items():
-                res.flags[t].append(ok)
-        res.ms = cli.ms
+    session = Session()
+    rk, call = session.rk, session.call
+    rk.create_list(
+        "bench",
+        "Benchmark",
+        names,
+        mode=mode or "stable",
+        method=base_method,
+        seed=seed,
+        rounds=rounds_kind,
+        planner=planner,
+    )
+    ranking = None
+    effort = 0  # fatigue grows per call made: a ranking of k counts as k - 1 pairs
+    for _ in range(budget):
+        if base_method == "rankify" and planner == "time" and res.rounds in FORECAST_AT:
+            f = rk.forecast("bench")
+            res.forecasts.append([res.rounds, f.median, f.low, f.high, f.at_least])
+        try:
+            round_ = call("next", rk.next_round, "bench")
+        except NothingToAsk:
+            res.finished = True
+            break
+        shown = [i.name for i in round_.items]
+        kind = round_.kind
+        idx = [index[x] for x in shown]
+        res.kinds.append(kind)
+        res.repeats.append(frozenset(idx) in seen)
+        seen.add(frozenset(idx))
+        if kind == "pair":
+            a, b = idx
+            res.implied.append(bool(known[a, b] or known[b, a]))
+            pick, seconds = judge.answer(shown, effort)
+            timed = {"round_seq": round_.round, "ms": int(seconds * 1000)}
+            if pick is None:
+                call("answer", rk.answer, "bench", cant_decide=True, **timed)
+                log.append((a, b, 2))
+                res.ties += 1
+            else:
+                call("answer", rk.answer, "bench", [pick], **timed)
+                log.append((a, b, 0 if pick == 1 else 1))
+                learn(*((a, b) if pick == 1 else (b, a)))
+        else:
+            if kind == "pick":  # implied when earlier answers already name the best
+                res.implied.append(any(known[x, [y for y in idx if y != x]].all() for x in idx))
+            else:
+                res.implied.append(all(known[x, y] or known[y, x] for x, y in _pairs(idx)))
+            numbers, seconds = judge.answer_set(shown, kind, effort)
+            timed = {"round_seq": round_.round, "ms": int(seconds * 1000)}
+            call("answer", rk.answer, "bench", list(numbers), **timed)
+            answer = [idx[k - 1] for k in numbers]
+            log.append(("set", idx, answer))
+            if kind == "pick":
+                for x in idx:
+                    if x != answer[0]:
+                        learn(answer[0], x)
+            else:
+                for x, y in _pairs(answer):
+                    learn(x, y)
+        effort += len(shown) - 1
+        res.seconds.append(seconds)
+
+        ranking = call("show", rk.ranking, "bench")
+        order = [i.name for i in ranking.items]
+        res.rounds += 1
+        res.taus.append(kendall_tau(order, theta))
+        for t, ok in targets_met(order, theta).items():
+            res.flags[t].append(ok)
+    res.ms = session.ms
+    rk.conn.close()
 
     if ranking is not None:
-        items_ = ranking["items"]
-        res.final_scores = [theta[i["name"]] for i in items_]
+        items_ = ranking.items
+        res.final_scores = [theta[i.name] for i in items_]
         for x, y in itertools.pairwise(items_):
-            if x["confidence"] is not None:
-                res.calibration.append((x["confidence"], theta[x["name"]] > theta[y["name"]]))
+            if x.confidence is not None:
+                res.calibration.append((x.confidence, theta[x.name] > theta[y.name]))
         for i in items_:
-            if i["could_be"] is not None:
-                lo, hi = i["could_be"]
-                res.coverage.append(lo <= true_rank[i["name"]] <= hi)
+            if i.could_be is not None:
+                lo, hi = i.could_be
+                res.coverage.append(lo <= true_rank[i.name] <= hi)
     _reorder_check(res, log, n, np.random.default_rng([seed, 2]))
     return res
 
@@ -735,8 +721,9 @@ def _report(
             f"{budget_per_item} rounds per item; {elapsed}."
         ),
         (
-            "- Every method ran through the CLI: `new --method`, then `next`, `answer` (or "
-            "`--cant-decide`) and `show` each round."
+            "- Every method ran through the service calls behind the CLI: a new list with "
+            "the method, then next round, answer (or can't decide) and ranking each round, in "
+            "one session held open as the TUI holds it."
         ),
         (
             "- Hidden scores: a few clear favourites and a crowded middle (Student-t with 3 degrees "
@@ -945,7 +932,11 @@ def _report(
     lines += [
         "## Compute cost per round",
         "",
-        "Median milliseconds per CLI call, in-process (real CLI code, no process start-up):",
+        (
+            "Median milliseconds per call, through the service layer in one open session (the "
+            "CLI's `next`, `answer` and `show` add command parsing, JSON and opening the "
+            "database):"
+        ),
         "",
         "| Method | next | answer | show |",
         "|---|---|---|---|",
