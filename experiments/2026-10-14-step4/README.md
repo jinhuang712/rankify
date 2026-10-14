@@ -1,6 +1,6 @@
 # Step 4 scripts and logs
 
-The scripts behind [the step 4 report](../2026-10-14-step4-fit-and-repeats.md), kept as they were run. They are one-off analyses, not maintained code: they reach into rankify's internals and set its switches (`service.EP_FIT`, `planner.ASK_AGAIN`) directly. All use practice lists (seeds 70000 + 1000 × items + list number), never the benchmark's test lists.
+The scripts behind [the step 4 report](../2026-10-14-step4-fit-and-repeats.md), kept as they were run (a formatter rewrapped their lines when they were committed; nothing else changed). They are one-off analyses, not maintained code: they reach into rankify's internals and set its switches (`service.EP_FIT`, `planner.ASK_AGAIN`) directly. All use practice lists (seeds 70000 + 1000 × items + list number), never the benchmark's test lists.
 
 Run each from the repository root, with the root as the first argument, for example:
 
