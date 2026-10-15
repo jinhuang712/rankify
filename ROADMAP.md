@@ -305,6 +305,8 @@ Results so far:
 - **One re-check per pair instead:** right at the stop in 62 of 100 sessions, against 59 with "only when contradicted" and 84 shipped. It rescued the careless judge (Stable 7 of 10) but not the human and noisy judges, and still spent a quarter of all rounds on re-checks.
 - **Against sorting:** every rankify version reached each target 2 to 4 times sooner than Just Sort It, and Ford–Johnson failed Stable in at least 7 of 10 lists once the judge made mistakes. With a perfect judge, EP reached Quick in 1.2 minutes against Ford–Johnson's 2.2 on these lists, but on step 2's test lists Ford–Johnson was ahead (1.1 against 1.6), so that is unsettled.
 
+- **Session length** ([report](experiments/2026-10-15-session-length.md), 10 and 20 items, 20 lists per setting): with 20 items no setting gets the top 3 right after 20 answers, so list size matters more than the switches for a person who stops there. Proposed, not yet applied: turn `EP_FIT` on (Quick 22–34% shorter for clear judges, same accuracy) and keep `ASK_AGAIN = "always"` (both rules lose accuracy for judges who slip).
+
 Open:
 
 - **How to re-check.** Neither rule keeps shipped accuracy for judges who slip. Next candidate: re-check only the pairs that decide the mode's target, with the new stop test deciding when the result is right rather than the floor giving up.
